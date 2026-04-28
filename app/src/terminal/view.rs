@@ -4325,6 +4325,7 @@ impl TerminalView {
                     }
                 }
                 RemoteServerManagerEvent::SessionConnecting { .. }
+                | RemoteServerManagerEvent::SessionReconnected { .. }
                 | RemoteServerManagerEvent::HostConnected { .. }
                 | RemoteServerManagerEvent::HostDisconnected { .. }
                 | RemoteServerManagerEvent::RepoMetadataSnapshot { .. }
