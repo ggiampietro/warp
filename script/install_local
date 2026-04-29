@@ -62,6 +62,15 @@ ensure_cargo_about() {
   cargo install --locked cargo-about@0.8.4
 }
 
+resolve_release_tag() {
+  if [[ -n "${GIT_RELEASE_TAG:-}" ]]; then
+    printf '%s\n' "$GIT_RELEASE_TAG"
+    return
+  fi
+
+  date '+v0.%Y.%m.%d.%H.%M.oss_01'
+}
+
 newest_match() {
   local pattern=$1
   find "$REPO_ROOT/target" $pattern -print0 | xargs -0 ls -td 2>/dev/null | head -n1
@@ -69,9 +78,12 @@ newest_match() {
 
 OS_TYPE="$(uname -s)"
 
+RELEASE_TAG="$(resolve_release_tag)"
+echo "Using release tag: $RELEASE_TAG"
+
 case "$OS_TYPE" in
   Darwin)
-    bundle_args=(--channel "$CHANNEL" --selfsign)
+    bundle_args=(--channel "$CHANNEL" --selfsign --release-tag "$RELEASE_TAG")
     if [[ "$DEBUG" == true ]]; then
       bundle_args+=(--debug)
     fi
@@ -97,7 +109,7 @@ case "$OS_TYPE" in
     ;;
 
   Linux)
-    bundle_args=(--channel "$CHANNEL" --packages deb)
+    bundle_args=(--channel "$CHANNEL" --packages deb --release-tag "$RELEASE_TAG")
     if [[ "$DEBUG" == true ]]; then
       bundle_args+=(--debug)
     fi
