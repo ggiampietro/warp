@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+CHANNEL="oss"
+DEBUG=false
+BOOTSTRAP=false
+OPEN_APP=false
+
+usage() {
+  cat <<'EOF'
+Usage: ./script/install_local [--debug] [--bootstrap] [--open]
+
+Builds Warp OSS from the current checkout and force-installs it every time.
+
+Options:
+  --debug       Build a debug bundle instead of the default release-like bundle
+  --bootstrap   Run ./script/bootstrap before building
+  --open        Launch the app after installation (macOS only)
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --debug)
+      DEBUG=true
+      shift
+      ;;
+    --bootstrap)
+      BOOTSTRAP=true
+      shift
+      ;;
+    --open)
+      OPEN_APP=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ "$BOOTSTRAP" == true ]]; then
+  ./script/bootstrap
+fi
+
+newest_match() {
+  local pattern=$1
+  find "$REPO_ROOT/target" $pattern -print0 | xargs -0 ls -td 2>/dev/null | head -n1
+}
+
+OS_TYPE="$(uname -s)"
+
+case "$OS_TYPE" in
+  Darwin)
+    bundle_args=(--channel "$CHANNEL" --selfsign)
+    if [[ "$DEBUG" == true ]]; then
+      bundle_args+=(--debug)
+    fi
+
+    ./script/bundle "${bundle_args[@]}"
+
+    app_path="$(newest_match "-type d -name WarpOss.app")"
+    if [[ -z "${app_path:-}" ]]; then
+      echo "Could not find built WarpOss.app under target/." >&2
+      exit 1
+    fi
+
+    echo "Force-installing $app_path to /Applications/WarpOss.app"
+    sudo rm -rf /Applications/WarpOss.app
+    sudo cp -R "$app_path" /Applications/WarpOss.app
+    xattr -dr com.apple.quarantine /Applications/WarpOss.app 2>/dev/null || true
+
+    echo "Installed: /Applications/WarpOss.app"
+    if [[ "$OPEN_APP" == true ]]; then
+      open /Applications/WarpOss.app
+    fi
+    ;;
+
+  Linux)
+    bundle_args=(--channel "$CHANNEL" --packages deb)
+    if [[ "$DEBUG" == true ]]; then
+      bundle_args+=(--debug)
+    fi
+
+    ./script/bundle "${bundle_args[@]}"
+
+    deb_path="$(newest_match "-type f -name *.deb")"
+    if [[ -z "${deb_path:-}" ]]; then
+      echo "Could not find built .deb package under target/." >&2
+      exit 1
+    fi
+
+    echo "Force-installing $deb_path"
+    sudo dpkg -i --force-all "$deb_path"
+    sudo apt-get install -f -y
+
+    echo "Installed package from: $deb_path"
+    ;;
+
+  *)
+    echo "Unsupported platform for ./script/install_local: $OS_TYPE" >&2
+    echo "Use ./script/windows/bundle.ps1 on Windows." >&2
+    exit 1
+    ;;
+esac
