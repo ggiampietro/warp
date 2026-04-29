@@ -12,133 +12,137 @@ Observed locally:
 ## Relevant Code
 - `crates/watcher/src/lib.rs` — low-level `BulkFilesystemWatcher` and background watcher thread
 - `crates/repo_metadata/src/watcher.rs` — `DirectoryWatcher`, shared repository watcher
-- `crates/repo_metadata/src/local_model.rs` — local repo metadata model creates its own bulk watcher and recursively registers repo paths
-- `crates/ai/src/index/full_source_code_embedding/manager.rs` — codebase index manager creates another bulk watcher and recursively registers repo paths
+- `crates/repo_metadata/src/local_model.rs` — local repo metadata model
+- `crates/ai/src/index/full_source_code_embedding/manager.rs` — codebase index manager
 - `app/src/lib.rs` — application wiring that initializes shared models including repo metadata and codebase indexing
 
 ## Current State
 ### Low-level watcher layer
-`BulkFilesystemWatcher::register_path()` forwards every add request to a background thread.
-That thread calls `watch_filtered(path, recursive_mode, filter)` directly.
+`BulkFilesystemWatcher::register_path()` still forwards every add request to a background thread and calls `watch_filtered(path, recursive_mode, filter)` directly.
 
-There does not appear to be a dedup or ref-count registry at this level.
+There is still no OS-level dedup or ref-count registry at this layer.
+
+What is now implemented:
+- debug instrumentation around register/unregister flow
+- watcher instance labels so logs identify the owning subsystem
+- counters for duplicate register attempts and unmatched unregisters
 
 ### Shared repository watcher
-`DirectoryWatcher` appears to be the intended shared watcher for repository updates.
+`DirectoryWatcher` is now the primary owner of recursive repo-tree watching.
 It starts recursive watching for repository roots when the first subscriber appears.
 
-### Additional recursive watchers
-At least two other subsystems also create their own `BulkFilesystemWatcher` instances and recursively watch repo paths:
+### Repo metadata and codebase indexing
+The two primary duplicate repo-tree watchers have now been removed:
 
-1. `LocalRepoMetadataModel`
-2. `CodebaseIndexManager`
+1. `LocalRepoMetadataModel` no longer creates a recursive repo watcher for git repositories; it subscribes to shared `Repository` updates from `DirectoryWatcher`
+2. `CodebaseIndexManager` no longer creates a recursive repo watcher for repo trees; it subscribes to shared `Repository` updates and converts them into `ChangedFiles`
 
-This likely duplicates recursive registration over the same large repository roots.
+`LocalRepoMetadataModel` still uses its private watcher for standalone lazily-loaded non-repository paths, which is expected and not part of the repo-tree explosion.
 
-## Proposed Changes
-
-### 1. Add registration deduplication/ref-counting in `BulkFilesystemWatcher`
+## Implemented Changes
+### 1. Instrumentation in `BulkFilesystemWatcher`
 File:
 - `crates/watcher/src/lib.rs`
 
-Introduce a registration map in the background watcher layer.
+Implemented:
+- register/unregister debug logs
+- duplicate registration diagnostics
+- unmatched unregister diagnostics
+- watcher instance naming (`repo_metadata::directory_watcher`, `repo_metadata::local_model`, `ai::codebase_index_manager`, etc.)
 
-Proposed behavior:
-- canonicalize or otherwise normalize path keys when possible
-- key registrations by path plus enough additional metadata to preserve correctness
-- on duplicate add, increment ref-count instead of calling `watch_filtered(...)` again
-- on remove, decrement ref-count and only call `unwatch(...)` at zero
-
-This provides immediate protection against repeated registration of the same path.
-
-### 2. Add instrumentation
-Files:
-- `crates/watcher/src/lib.rs`
-
-Add debug logs and counters around:
-- register requests
-- duplicate register requests
-- unregister requests
-- unmatched unregister requests
-- current unique watched path count
-
-This makes it possible to confirm which subsystems are causing repeated registration.
-
-### 3. Consolidate repo-tree watching onto `DirectoryWatcher`
+### 2. Consolidate repo-tree watching onto `DirectoryWatcher`
 Files:
 - `crates/repo_metadata/src/local_model.rs`
 - `crates/ai/src/index/full_source_code_embedding/manager.rs`
-- possibly nearby subscribers using repo updates
 
-Target direction:
-- `DirectoryWatcher` remains the single owner of recursive repo-tree watching
-- repo metadata, indexing, and similar consumers subscribe to shared repository updates instead of each creating another recursive watcher over the same roots
+Implemented:
+- `LocalRepoMetadataModel` now subscribes to `Repository` updates instead of owning a recursive repo watcher
+- `CodebaseIndexManager` now subscribes to `Repository` updates instead of owning a recursive repo watcher
+- both consumers keep their existing higher-level update logic, only the filesystem event source changed
 
-This is the architectural cleanup after low-level protection is in place.
+## Deferred Change
+### Low-level dedup/ref-counting in `BulkFilesystemWatcher`
+File:
+- `crates/watcher/src/lib.rs`
 
-## Implementation Plan
+Status:
+- deferred for now
 
+Reason:
+- filter semantics make naive low-level dedup risky
+- after the architectural consolidation, the main repo-tree explosion should already be addressed with less behavioral risk
+
+If needed later, the design remains:
+- canonicalize or otherwise normalize path keys when possible
+- key registrations by path plus enough metadata to preserve correctness
+- on duplicate add, increment ref-count instead of calling `watch_filtered(...)`
+- on remove, decrement ref-count and only call `unwatch(...)` at zero
+
+## Implementation Plan Status
 ### Phase 1: confirm duplication with instrumentation
-1. Add temporary logging in `BulkFilesystemWatcher::register_path()` and unregister flow.
-2. Record normalized path, recursive mode, and whether the registration is new or duplicate.
-3. Reproduce with a large repository such as `~/vendrix`.
-4. Confirm the same repo root is registered from multiple subsystems.
+Status: implemented in code, runtime repro still recommended.
 
 ### Phase 2: implement low-level dedup/ref-counting
-1. Extend the background watcher with a registration map.
-2. On add:
-   - if registration is new, call `watch_filtered(...)`
-   - otherwise increment ref-count only
-3. On remove:
-   - decrement ref-count
-   - call `unwatch(...)` only when ref-count reaches zero
-4. Add tests for nested add/remove behavior.
+Status: deferred.
 
 ### Phase 3: reduce architectural duplication
-1. Audit all `BulkFilesystemWatcher::new(...)` call sites used for repo trees.
-2. Remove or reduce independent recursive repo watches in:
-   - `LocalRepoMetadataModel`
-   - `CodebaseIndexManager`
-3. Convert those consumers to reuse `DirectoryWatcher` repository updates where practical.
+Status: implemented for the main repo-tree duplicates.
+
+Completed:
+- `LocalRepoMetadataModel` ✅
+- `CodebaseIndexManager` ✅
 
 ### Phase 4: regression coverage
-1. Add tests ensuring duplicate registration of the same repo path does not multiply watcher state.
-2. Add integration coverage for repo metadata + codebase indexing active together.
-3. Verify watcher-driven features still function correctly after consolidation.
+Status: partial.
+
+Completed:
+- diagnostics-level watcher tests ✅
+- repo metadata subscription/update regression test ✅
+- codebase index changed-files conversion regression test ✅
+
+Still useful:
+- end-to-end runtime validation on a large repo
+- before/after inotify count measurement
 
 ## Risks and Mitigations
-
 ### Filter semantics
 Different callers may register the same path with different filters.
 
 Mitigation:
-- either include filter identity in the dedup key
-- or consolidate repo-tree watching so one broad watcher owns the OS-level watch and consumers filter events in memory
+- prefer shared broad repo-tree watching with downstream in-memory filtering
+- keep low-level dedup deferred unless filter identity is handled correctly
 
 ### Path aliasing / symlinks
-Different path spellings may bypass dedup.
+Different path spellings may bypass dedup or lookup.
 
 Mitigation:
-- normalize or canonicalize where safe
-- add logging for non-normalized duplicates during rollout
+- canonicalize where safe
+- keep debug logging to detect aliasing
 
 ### Unwatch correctness
-Ref-count bugs can leak watches or remove them too early.
+Subscription cleanup bugs can leak watchers or remove them too early.
 
 Mitigation:
-- add explicit add/remove sequencing tests
-- log unmatched unregisters
+- explicit unsubscribe on repo/index removal
+- regression tests around subscription-driven updates
 
 ## Testing and Validation
 - Compare inotify watch usage before and after on a large repo
+- Run with debug logs and verify repo-tree registrations now primarily come from `repo_metadata::directory_watcher`
 - Verify repo metadata updates still fire
 - Verify codebase indexing still updates
 - Verify other watcher users are unaffected
 - Verify unrelated local dev tools can still start watchers while Warp is open
 
+Suggested runtime command:
+
+```bash
+RUST_LOG=watcher=debug,repo_metadata=debug,ai=debug ./script/run
+```
+
 ## Expected Outcome
-After deduplication and watcher consolidation:
+After the implemented consolidation:
 
 - Warp should consume far fewer inotify watches on large repos
-- watch usage should no longer scale multiplicatively across subsystems
-- unrelated tools should stop failing due to watch exhaustion when Warp is running
+- watch usage should no longer scale multiplicatively across repo metadata and codebase indexing
+- unrelated tools should be less likely to fail due to watch exhaustion while Warp is running

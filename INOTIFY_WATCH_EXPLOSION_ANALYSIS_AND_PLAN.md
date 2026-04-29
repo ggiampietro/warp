@@ -198,3 +198,16 @@ After deduplication and watcher consolidation:
 - large repositories should no longer multiply inotify usage across subsystems
 - Warp should consume far fewer inotify watches
 - unrelated tools should stop failing due to watch exhaustion when Warp is open
+
+## Result
+Runtime validation now strongly supports the hypothesis and fix.
+
+Observed after the implemented consolidation:
+
+- recursive repo-tree registrations show up from the shared `repo_metadata::directory_watcher`
+- no repo-root recursive registrations were observed from `repo_metadata::local_model`
+- no repo-root recursive registrations were observed from `ai::codebase_index_manager`
+- measured inotify usage dropped from about `261673` to about `45098`
+- that is a reduction of about `82.7%`
+
+This suggests the main multiplicative repo-tree watcher explosion has been resolved.

@@ -5,6 +5,7 @@
 mod tests {
     use crate::entry::{DirectoryEntry, Entry, FileMetadata};
     use crate::file_tree_store::{FileTreeEntry, FileTreeEntryState, FileTreeState};
+    use crate::{RepositoryUpdate, TargetFile};
     use crate::local_model::{
         GetContentsArgs, IndexedRepoState, LocalRepoMetadataModel, RepoUpdate,
         RepositoryMetadataEvent,
@@ -26,11 +27,18 @@ mod tests {
 
     impl LocalRepoMetadataModel {
         fn new_for_test() -> Self {
+            #[cfg(feature = "local_fs")]
+            let (repository_update_tx, _repository_update_rx) = futures::channel::mpsc::unbounded();
+
             Self {
                 repositories: HashMap::new(),
                 lazy_loaded_paths: Default::default(),
                 #[cfg(feature = "local_fs")]
                 watcher: Default::default(),
+                #[cfg(feature = "local_fs")]
+                repository_subscriptions: Default::default(),
+                #[cfg(feature = "local_fs")]
+                repository_update_tx,
                 emit_incremental_updates: false,
             }
         }
@@ -291,6 +299,113 @@ mod tests {
                     assert!(state
                         .entry
                         .contains(&StandardizedPath::try_from_local(&source_file).unwrap()));
+                });
+            });
+        });
+    }
+
+    #[cfg(feature = "local_fs")]
+    #[test]
+    fn test_index_directory_subscribes_to_shared_repository_updates() {
+        VirtualFS::test("repo_subscription_updates_tree", |dirs, mut vfs| {
+            vfs.mkdir("repo/.git/objects")
+                .mkdir("repo/src")
+                .with_files(vec![
+                    Stub::FileWithContent("repo/.git/HEAD", "ref: refs/heads/main"),
+                    Stub::FileWithContent(
+                        "repo/.git/config",
+                        "[core]\n\trepositoryformatversion = 0",
+                    ),
+                    Stub::FileWithContent("repo/src/main.rs", "fn main() {}\n"),
+                ]);
+
+            let repo_root = dirs.tests().join("repo");
+            let new_file = repo_root.join("src/lib.rs");
+
+            App::test((), |mut app| async move {
+                let _detected_repositories =
+                    app.add_singleton_model(|_| DetectedRepositories::default());
+                let directory_watcher = app.add_singleton_model(DirectoryWatcher::new);
+                let repository_handle = directory_watcher.update(&mut app, |watcher, ctx| {
+                    watcher
+                        .add_directory(
+                            StandardizedPath::from_local_canonicalized(&repo_root).unwrap(),
+                            ctx,
+                        )
+                        .unwrap()
+                });
+                let model_handle = app.add_model(LocalRepoMetadataModel::new);
+
+                let repo_root_std = StandardizedPath::from_local_canonicalized(&repo_root).unwrap();
+                let (tx, rx) = oneshot::channel();
+                let updated = Rc::new(RefCell::new(Some(tx)));
+                let updated_for_event = updated.clone();
+                let repo_root_for_event = repo_root_std.clone();
+                app.update(|ctx| {
+                    ctx.subscribe_to_model(&model_handle, move |_, event, _ctx| {
+                        if matches!(
+                            event,
+                            RepositoryMetadataEvent::FileTreeEntryUpdated { path }
+                                if *path == repo_root_for_event
+                        ) {
+                            if let Some(tx) = updated_for_event.borrow_mut().take() {
+                                let _ = tx.send(());
+                            }
+                        }
+                    });
+                });
+
+                model_handle.update(&mut app, |model, ctx| {
+                    model.index_directory(repository_handle.clone(), ctx).unwrap();
+                });
+
+                for _ in 0..50 {
+                    let ready = model_handle.read(&app, |model, _| {
+                        model.repository_subscriptions.contains_key(&repo_root_std)
+                            && matches!(
+                                model.repository_state(&repo_root_std),
+                                Some(IndexedRepoState::Indexed(_))
+                            )
+                    });
+                    if ready {
+                        break;
+                    }
+                    warpui::r#async::Timer::after(Duration::from_millis(10)).await;
+                }
+
+                let subscriber_id = model_handle.read(&app, |model, _| {
+                    model.repository_subscriptions[&repo_root_std].subscriber_id
+                });
+
+                std::fs::write(&new_file, "pub fn lib() {}\n").unwrap();
+
+                let update_future = repository_handle.update(&mut app, |repository, ctx| {
+                    repository.notify_subscriber(
+                        subscriber_id,
+                        &RepositoryUpdate {
+                            added: [TargetFile::new(new_file.clone(), false)].into_iter().collect(),
+                            ..RepositoryUpdate::default()
+                        },
+                        ctx,
+                    )
+                });
+                if let Some(future) = update_future {
+                    future.await;
+                }
+
+                rx.with_timeout(Duration::from_secs(5))
+                    .await
+                    .expect("timed out waiting for repository update")
+                    .expect("repository update sender dropped");
+
+                model_handle.read(&app, |model, _ctx| {
+                    let Some(IndexedRepoState::Indexed(state)) = model.repository_state(&repo_root_std)
+                    else {
+                        panic!("expected indexed repo state");
+                    };
+                    assert!(state
+                        .entry
+                        .contains(&StandardizedPath::try_from_local(&new_file).unwrap()));
                 });
             });
         });
@@ -1174,6 +1289,7 @@ Thumbs.db
                         let result1 = model.add_repository_internal(
                             StandardizedPath::from_local_canonicalized(&real_repo).unwrap(),
                             state.clone(),
+                            false,
                             ctx,
                         );
                         assert!(result1.is_ok());
@@ -1182,6 +1298,7 @@ Thumbs.db
                         let result2 = model.add_repository_internal(
                             StandardizedPath::from_local_canonicalized(&symlink_repo).unwrap(),
                             state.clone(),
+                            false,
                             ctx,
                         );
                         assert!(result2.is_ok());
@@ -1190,6 +1307,7 @@ Thumbs.db
                         let result3 = model.add_repository_internal(
                             StandardizedPath::from_local_canonicalized(&relative_repo).unwrap(),
                             state.clone(),
+                            false,
                             ctx,
                         );
                         assert!(result3.is_ok());

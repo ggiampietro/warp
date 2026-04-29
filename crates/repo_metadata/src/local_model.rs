@@ -31,9 +31,11 @@ use crate::{
 use std::sync::Arc;
 cfg_if::cfg_if! {
     if #[cfg(feature = "local_fs")] {
+        use futures::channel::mpsc;
         use notify_debouncer_full::notify::{RecursiveMode, WatchFilter};
         use crate::repositories::{DetectedRepositories, DetectedRepositoriesEvent};
-        use watcher::{BulkFilesystemWatcher, BulkFilesystemWatcherEvent};
+        use crate::repository::{RepositorySubscriber, SubscriberId};
+        use watcher::BulkFilesystemWatcher;
         use warpui::SingletonEntity as _;
 
         /// Duration between filesystem watch events in seconds
@@ -112,13 +114,37 @@ pub struct LocalRepoMetadataModel {
     repositories: HashMap<StandardizedPath, IndexedRepoState>,
     /// Refcounts for lazily-loaded standalone paths tracked in the model.
     lazy_loaded_paths: HashMap<StandardizedPath, usize>,
-    /// File system watcher for monitoring changes.
+    /// File system watcher for monitoring standalone non-repository paths.
     #[cfg(feature = "local_fs")]
     watcher: Option<ModelHandle<BulkFilesystemWatcher>>,
+    /// Per-repository subscriptions into the shared DirectoryWatcher/Repository pipeline.
+    #[cfg(feature = "local_fs")]
+    repository_subscriptions: HashMap<StandardizedPath, RepositorySubscription>,
+    /// Sender used by repository subscribers to forward repo-scoped updates back into this model.
+    #[cfg(feature = "local_fs")]
+    repository_update_tx: mpsc::UnboundedSender<RepositoryFilesystemUpdate>,
     /// When true, emit [`RepositoryMetadataEvent::IncrementalUpdateReady`]
     /// events after applying watcher mutations. Only the remote server
     /// variant enables this.
     emit_incremental_updates: bool,
+}
+
+#[cfg(feature = "local_fs")]
+struct RepositorySubscription {
+    repository: ModelHandle<Repository>,
+    subscriber_id: SubscriberId,
+}
+
+#[cfg(feature = "local_fs")]
+#[derive(Debug, Clone)]
+struct RepositoryFilesystemUpdate {
+    repo_path: StandardizedPath,
+    update: crate::RepositoryUpdate,
+}
+
+#[cfg(feature = "local_fs")]
+struct LocalModelRepositorySubscriber {
+    repository_update_tx: mpsc::UnboundedSender<RepositoryFilesystemUpdate>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -197,23 +223,32 @@ impl LocalRepoMetadataModel {
     /// Creates a new LocalRepoMetadataModel.
     #[cfg_attr(not(feature = "local_fs"), allow(unused_variables), allow(unused_mut))]
     pub fn new(ctx: &mut ModelContext<Self>) -> Self {
+        #[cfg(feature = "local_fs")]
+        let (repository_update_tx, repository_update_rx) = mpsc::unbounded();
+
         let mut model = Self {
             repositories: HashMap::new(),
             lazy_loaded_paths: HashMap::new(),
             #[cfg(feature = "local_fs")]
             watcher: None,
+            #[cfg(feature = "local_fs")]
+            repository_subscriptions: HashMap::new(),
+            #[cfg(feature = "local_fs")]
+            repository_update_tx,
             emit_incremental_updates: false,
         };
         cfg_if::cfg_if! {
             if #[cfg(feature = "local_fs")] {
                 let watcher = ctx.add_model(|ctx| {
-                    BulkFilesystemWatcher::new(
+                    BulkFilesystemWatcher::new_named(
+                        "repo_metadata::local_model",
                         std::time::Duration::from_secs(FILESYSTEM_WATCHER_DEBOUNCE_SECS),
                         ctx,
                     )
                 });
                 ctx.subscribe_to_model(&watcher, Self::handle_watcher_event);
                 model.watcher = Some(watcher);
+                ctx.spawn_stream_local(repository_update_rx, Self::handle_repository_update, |_, _| {});
 
                 ctx.subscribe_to_model(&DetectedRepositories::handle(ctx), |me, event, ctx| {
                     let DetectedRepositoriesEvent::DetectedGitRepo { repository, .. } = event;
@@ -238,11 +273,11 @@ impl LocalRepoMetadataModel {
         self.emit_incremental_updates = enabled;
     }
 
-    /// Handles events from the BulkFilesystemWatcher.
+    /// Handles events from the standalone-path BulkFilesystemWatcher.
     #[cfg(feature = "local_fs")]
     fn handle_watcher_event(
         &mut self,
-        event: &BulkFilesystemWatcherEvent,
+        event: &watcher::BulkFilesystemWatcherEvent,
         ctx: &mut ModelContext<Self>,
     ) {
         // Create a map to collect changes per repository
@@ -278,13 +313,61 @@ impl LocalRepoMetadataModel {
             }
         }
 
-        // Collect all paths that have been updated and emit an event.
+        self.apply_repo_updates(repo_updates, ctx);
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn handle_repository_update(
+        &mut self,
+        event: RepositoryFilesystemUpdate,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let repo_update = RepoUpdate {
+            added: event
+                .update
+                .added_or_modified()
+                .map(|file| file.path.clone())
+                .collect(),
+            deleted: event
+                .update
+                .deleted
+                .iter()
+                .map(|file| file.path.clone())
+                .collect(),
+            moved: event
+                .update
+                .moved
+                .iter()
+                .map(|(to, from)| (to.path.clone(), from.path.clone()))
+                .collect(),
+        };
+
+        if repo_update.added.is_empty()
+            && repo_update.deleted.is_empty()
+            && repo_update.moved.is_empty()
+        {
+            return;
+        }
+
+        let mut repo_updates = HashMap::new();
+        repo_updates.insert(event.repo_path, repo_update);
+        self.apply_repo_updates(repo_updates, ctx);
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn apply_repo_updates(
+        &mut self,
+        repo_updates: HashMap<StandardizedPath, RepoUpdate>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if repo_updates.is_empty() {
+            return;
+        }
+
         ctx.emit(RepositoryMetadataEvent::FileTreeUpdated {
             paths: repo_updates.keys().cloned().collect(),
         });
-        // Apply updates to each affected repository asynchronously.
-        // Phase 1 (background thread): compute lightweight mutations via filesystem I/O.
-        // Phase 2 (main thread callback): apply mutations directly to the tree — no clone needed.
+
         for (repo_path, repo_scoped_update) in repo_updates {
             if let Some(IndexedRepoState::Indexed(state)) = self.repositories.get_mut(&repo_path) {
                 let repo_path_clone = repo_path.clone();
@@ -350,6 +433,7 @@ impl LocalRepoMetadataModel {
         &mut self,
         repo_path: StandardizedPath,
         state: FileTreeState,
+        watch_with_local_watcher: bool,
         ctx: &mut ModelContext<Self>,
     ) -> Result<(), RepoMetadataError> {
         let local_path = repo_path
@@ -369,7 +453,7 @@ impl LocalRepoMetadataModel {
 
         // Register this path with the watcher if we have one
         #[cfg(feature = "local_fs")]
-        {
+        if watch_with_local_watcher {
             if let Some(ref watcher) = self.watcher {
                 let watch_path = local_path.clone();
                 watcher.update(ctx, |watcher, _ctx| {
@@ -405,15 +489,23 @@ impl LocalRepoMetadataModel {
         ctx: &mut ModelContext<Self>,
     ) -> Result<(), RepoMetadataError> {
         if self.repositories.remove(repo_path).is_some() {
-            // Unregister from watcher
+            // Unregister from watcher / shared repository subscription.
             #[cfg(feature = "local_fs")]
             {
-                if let Some(ref watcher) = self.watcher {
-                    if let Some(local_path) = repo_path.to_local_path() {
-                        watcher.update(ctx, |watcher, _ctx| {
-                            std::mem::drop(watcher.unregister_path(&local_path));
-                        });
+                if self.lazy_loaded_paths.contains_key(repo_path) {
+                    if let Some(ref watcher) = self.watcher {
+                        if let Some(local_path) = repo_path.to_local_path() {
+                            watcher.update(ctx, |watcher, _ctx| {
+                                std::mem::drop(watcher.unregister_path(&local_path));
+                            });
+                        }
                     }
+                }
+
+                if let Some(subscription) = self.repository_subscriptions.remove(repo_path) {
+                    subscription.repository.update(ctx, |repository, ctx| {
+                        repository.stop_watching(subscription.subscriber_id, ctx);
+                    });
                 }
             }
 
@@ -505,7 +597,7 @@ impl LocalRepoMetadataModel {
         .map_err(RepoMetadataError::BuildTree)?;
 
         let state = FileTreeState::new_lazy_loaded(root_entry);
-        self.add_repository_internal(path.clone(), state, ctx)?;
+        self.add_repository_internal(path.clone(), state, true, ctx)?;
         self.lazy_loaded_paths.insert(path.clone(), 1);
         Ok(())
     }
@@ -527,6 +619,35 @@ impl LocalRepoMetadataModel {
         self.lazy_loaded_paths.remove(path);
         // remove_repository unregisters the watcher and emits RepositoryRemoved.
         let _ = self.remove_repository(path, ctx);
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn subscribe_to_repository_updates(
+        &mut self,
+        repo_path: &StandardizedPath,
+        repository: ModelHandle<Repository>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if self.repository_subscriptions.contains_key(repo_path) {
+            return;
+        }
+
+        let subscriber = LocalModelRepositorySubscriber {
+            repository_update_tx: self.repository_update_tx.clone(),
+        };
+        let start = repository.update(ctx, |repository, ctx| {
+            repository.start_watching(Box::new(subscriber), ctx)
+        });
+
+        let subscriber_id = start.subscriber_id;
+        std::mem::drop(start.registration_future);
+        self.repository_subscriptions.insert(
+            repo_path.clone(),
+            RepositorySubscription {
+                repository,
+                subscriber_id,
+            },
+        );
     }
 
     /// Loads a specific directory inside an already-tracked tree.
@@ -841,6 +962,7 @@ impl LocalRepoMetadataModel {
             Some(IndexedRepoState::Indexed(_))
                 if !self.lazy_loaded_paths.contains_key(&std_path) =>
             {
+                self.subscribe_to_repository_updates(&std_path, repository.clone(), ctx);
                 log::debug!("Repository already indexed: {std_path}");
                 return Ok(());
             }
@@ -848,6 +970,12 @@ impl LocalRepoMetadataModel {
                 // Was a lazy-loaded path – allow upgrading to a real repo.
                 log::info!("Upgrading lazy-loaded path to git repo: {repo_path_str}");
                 self.lazy_loaded_paths.remove(&std_path);
+
+                if let Some(ref watcher) = self.watcher {
+                    watcher.update(ctx, |watcher, _ctx| {
+                        std::mem::drop(watcher.unregister_path(&local_path));
+                    });
+                }
             }
             Some(IndexedRepoState::Pending) => {
                 log::debug!("Repository already being indexed: {repo_path_str}");
@@ -919,18 +1047,28 @@ impl LocalRepoMetadataModel {
                   ctx| {
                 match build_result {
                     Ok(root_entry) => {
-                        let state =
-                            FileTreeState::new(root_entry, gitignores_for_build, Some(repository_handle));
+                        let state = FileTreeState::new(
+                            root_entry,
+                            gitignores_for_build,
+                            Some(repository_handle.clone()),
+                        );
 
-                        if let Err(e) =
-                            model.add_repository_internal(std_repo_path.clone(), state, ctx)
-                        {
+                        if let Err(e) = model.add_repository_internal(
+                            std_repo_path.clone(),
+                            state,
+                            false,
+                            ctx,
+                        ) {
                             log::warn!("Failed to add repository {repo_path_str}: {e:?}");
-                            // On failure, mark the repository as failed
                             model
                                 .repositories
                                 .insert(std_repo_path, IndexedRepoState::Failed(e));
                         } else {
+                            model.subscribe_to_repository_updates(
+                                &std_repo_path,
+                                repository_handle,
+                                ctx,
+                            );
                             log::info!(
                                 "Successfully indexed repository: {} with {} files",
                                 repo_path_str,
@@ -981,6 +1119,32 @@ impl LocalRepoMetadataModel {
 
 impl warpui::Entity for LocalRepoMetadataModel {
     type Event = RepositoryMetadataEvent;
+}
+
+#[cfg(feature = "local_fs")]
+impl RepositorySubscriber for LocalModelRepositorySubscriber {
+    fn on_scan(
+        &mut self,
+        _repository: &Repository,
+        _ctx: &mut ModelContext<Repository>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        Box::pin(async {})
+    }
+
+    fn on_files_updated(
+        &mut self,
+        repository: &Repository,
+        update: &crate::RepositoryUpdate,
+        _ctx: &mut ModelContext<Repository>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        let _ = self
+            .repository_update_tx
+            .unbounded_send(RepositoryFilesystemUpdate {
+                repo_path: repository.root_dir().clone(),
+                update: update.clone(),
+            });
+        Box::pin(async {})
+    }
 }
 
 /// Helper function to recursively collect contents (files and optionally directories) from an Entry tree.

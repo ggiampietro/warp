@@ -54,7 +54,14 @@ The low-level watcher layer appears to accept repeated registrations without ded
 4. Debug logging or metrics can identify duplicate registration sources.
 
 ## Validation
-- Reproduce with a large repo such as `~/vendrix`
-- Compare Warp watch counts before and after the change
-- Verify repo metadata, indexing, and other watcher-driven features still update correctly
-- Verify unrelated tools can create watchers while Warp is open
+Completed runtime validation on a large repo setup:
+- before: about `261673` inotify watches
+- after consolidation: about `45098` inotify watches
+- reduction: about `82.7%`
+
+Debug logging confirmed that recursive repo-tree registrations now primarily come from the shared `repo_metadata::directory_watcher`, not separate repo-tree watchers in repo metadata or codebase indexing.
+
+Additional checks:
+- repo metadata still indexed repositories successfully
+- codebase indexing / outline-related repo activity still functioned
+- unrelated tools should have substantially more inotify headroom while Warp is open

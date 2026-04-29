@@ -48,7 +48,8 @@ impl DirectoryWatcher {
         cfg_if::cfg_if! {
             if #[cfg(feature = "local_fs")] {
                 let fs_watcher = ctx.add_model(|ctx| {
-                    BulkFilesystemWatcher::new(
+                    BulkFilesystemWatcher::new_named(
+                        "repo_metadata::directory_watcher",
                         std::time::Duration::from_millis(FILESYSTEM_WATCHER_DEBOUNCE_MILLI_SECS),
                         ctx,
                     )
@@ -77,7 +78,9 @@ impl DirectoryWatcher {
     pub fn new_for_testing(ctx: &mut ModelContext<Self>) -> Self {
         cfg_if::cfg_if! {
             if #[cfg(feature = "local_fs")] {
-                let fs_watcher = ctx.add_model(|_ctx| BulkFilesystemWatcher::new_for_test());
+                let fs_watcher = ctx.add_model(|_ctx| {
+                    BulkFilesystemWatcher::new_for_test_named("repo_metadata::directory_watcher")
+                });
                 ctx.subscribe_to_model(&fs_watcher, Self::handle_watcher_event);
             } else {
                 let _ = ctx;

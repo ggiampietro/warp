@@ -12,12 +12,10 @@ use thiserror::Error;
 cfg_if::cfg_if! {
     if #[cfg(feature = "local_fs")] {
         use chrono::Utc;
+        use futures::channel::mpsc;
         use super::changed_files::ChangedFiles;
-        use crate::index::path_passes_filters;
-        use ignore::gitignore::Gitignore;
-        use notify_debouncer_full::notify::{RecursiveMode, WatchFilter};
+        use repo_metadata::repository::{RepositorySubscriber, SubscriberId};
         use warp_core::features::FeatureFlag;
-        use watcher::{BulkFilesystemWatcher, BulkFilesystemWatcherEvent};
         use warpui::r#async::Timer;
         use warp_core::{send_telemetry_from_ctx, report_if_error};
         use crate::telemetry::AITelemetryEvent;
@@ -42,9 +40,6 @@ use crate::{
     index::locations::CodeContextLocation,
     workspace::{WorkspaceMetadata, WorkspaceMetadataEvent},
 };
-
-/// The interval for debouncing filesystem events.
-const REPO_WATCHER_DEBOUNCE_DURATION: Duration = Duration::from_secs(10);
 
 /// The number of minutes between writing index snapshots.
 const REPO_SNAPSHOT_PERSISTENCE_MINUTES: u64 = 10;
@@ -170,7 +165,9 @@ pub struct CodebaseIndexManager {
     store_client: Arc<dyn StoreClient>,
 
     #[cfg(feature = "local_fs")]
-    watcher: ModelHandle<BulkFilesystemWatcher>,
+    repository_subscriptions: HashMap<PathBuf, RepositorySubscription>,
+    #[cfg(feature = "local_fs")]
+    repository_update_tx: mpsc::UnboundedSender<RepositoryIndexUpdate>,
 
     build_queue: BuildQueue,
 
@@ -179,6 +176,25 @@ pub struct CodebaseIndexManager {
     max_files_repo_limit: usize,
 
     embedding_generation_batch_size: usize,
+}
+
+#[cfg(feature = "local_fs")]
+struct RepositorySubscription {
+    repository: ModelHandle<Repository>,
+    subscriber_id: SubscriberId,
+}
+
+#[cfg(feature = "local_fs")]
+#[derive(Debug, Clone)]
+struct RepositoryIndexUpdate {
+    root_path: PathBuf,
+    changed_files: ChangedFiles,
+}
+
+#[cfg(feature = "local_fs")]
+struct CodebaseIndexRepositorySubscriber {
+    root_path: PathBuf,
+    repository_update_tx: mpsc::UnboundedSender<RepositoryIndexUpdate>,
 }
 
 impl CodebaseIndexManager {
@@ -191,12 +207,8 @@ impl CodebaseIndexManager {
         store_client: Arc<dyn StoreClient>,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "local_fs")] {
-                let file_watcher = ctx.add_model(|ctx| BulkFilesystemWatcher::new(REPO_WATCHER_DEBOUNCE_DURATION, ctx));
-                ctx.subscribe_to_model(&file_watcher, Self::handle_watcher_event);
-            }
-        }
+        #[cfg(feature = "local_fs")]
+        let (repository_update_tx, repository_update_rx) = mpsc::unbounded();
 
         log::debug!(
             "Received {:?} persisted codebase indices",
@@ -229,12 +241,17 @@ impl CodebaseIndexManager {
             codebase_indices: HashMap::new(),
             store_client,
             #[cfg(feature = "local_fs")]
-            watcher: file_watcher,
+            repository_subscriptions: HashMap::new(),
+            #[cfg(feature = "local_fs")]
+            repository_update_tx,
             build_queue,
             max_indices: max_index_count,
             max_files_repo_limit,
             embedding_generation_batch_size,
         };
+
+        #[cfg(feature = "local_fs")]
+        ctx.spawn_stream_local(repository_update_rx, Self::handle_repository_update, |_, _| {});
 
         // Start building the first index in the queue.
         if let Some(next_repo) = me.build_queue.pick_next_sync() {
@@ -245,14 +262,16 @@ impl CodebaseIndexManager {
     }
 
     #[cfg(feature = "test-util")]
-    pub fn new_for_test(store_client: Arc<dyn StoreClient>, ctx: &mut ModelContext<Self>) -> Self {
+    pub fn new_for_test(store_client: Arc<dyn StoreClient>, _ctx: &mut ModelContext<Self>) -> Self {
         #[cfg(feature = "local_fs")]
-        let file_watcher = ctx.add_model(|_| BulkFilesystemWatcher::new_for_test());
+        let (repository_update_tx, _repository_update_rx) = mpsc::unbounded();
         Self {
             codebase_indices: HashMap::new(),
             store_client,
             #[cfg(feature = "local_fs")]
-            watcher: file_watcher,
+            repository_subscriptions: HashMap::new(),
+            #[cfg(feature = "local_fs")]
+            repository_update_tx,
             build_queue: BuildQueue::empty(),
             max_indices: None,
             max_files_repo_limit: 0,
@@ -282,6 +301,9 @@ impl CodebaseIndexManager {
     /// Cleans up all indexed codebases.
     fn drop_all_indices(&mut self, ctx: &mut ModelContext<Self>) {
         self.drop_indices(self.codebase_indices.keys().cloned().collect_vec(), ctx);
+
+        #[cfg(feature = "local_fs")]
+        self.unsubscribe_from_all_repository_updates(ctx);
 
         // Replace the HashMap with the default (empty) one.
         // Unlike `.clear()` and `.drain()`, this releases the allocated memory.
@@ -346,9 +368,9 @@ impl CodebaseIndexManager {
         // Drop the in-memory index.
         self.codebase_indices.remove(root_path);
 
-        // Stop the filewatcher from receiving events for this codebase.
+        // Stop receiving shared repository updates for this codebase.
         #[cfg(feature = "local_fs")]
-        self.unwatch_path(root_path, ctx);
+        self.unsubscribe_from_repository_updates(root_path, ctx);
     }
 
     /// Fully clears all persisted data related to a single codebase index
@@ -375,53 +397,25 @@ impl CodebaseIndexManager {
     }
 
     #[cfg(feature = "local_fs")]
-    fn group_file_events(
-        &self,
-        event: &BulkFilesystemWatcherEvent,
-    ) -> HashMap<PathBuf, ChangedFiles> {
-        let mut added_or_updated = event.added_or_updated_set();
-        let mut deleted = event.deleted.clone();
+    fn changed_files_from_repository_update(
+        update: &repo_metadata::RepositoryUpdate,
+    ) -> ChangedFiles {
+        let mut changed_files = ChangedFiles::default();
 
-        // For now, treat a move as a deletion followed by an addition.
-        // This means deletions must be processed before additions/updates.
-        for (old_path, new_path) in event.moved.iter() {
-            deleted.insert(old_path.to_path_buf());
-            added_or_updated.insert(new_path.to_path_buf());
+        for file in &update.deleted {
+            changed_files.deletions.insert(file.path.clone());
         }
 
-        let mut updates_by_root: HashMap<PathBuf, ChangedFiles> = HashMap::new();
-
-        for path in deleted {
-            if let Some(root_path) = self.root_path_for_codebase(&path) {
-                updates_by_root
-                    .entry(root_path)
-                    .or_default()
-                    .deletions
-                    .insert(path);
-            } else {
-                log::warn!(
-                    "Could not find index root for deleted file: {}",
-                    path.display()
-                );
-            }
+        for file in update.added_or_modified() {
+            changed_files.upsertions.insert(file.path.clone());
         }
 
-        for path in added_or_updated {
-            if let Some(root_path) = self.root_path_for_codebase(&path) {
-                updates_by_root
-                    .entry(root_path)
-                    .or_default()
-                    .upsertions
-                    .insert(path);
-            } else {
-                log::warn!(
-                    "Could not find index root for updated file: {}",
-                    path.display()
-                );
-            }
+        for (to, from) in &update.moved {
+            changed_files.deletions.insert(from.path.clone());
+            changed_files.upsertions.insert(to.path.clone());
         }
 
-        updates_by_root
+        changed_files
     }
 
     #[cfg(feature = "local_fs")]
@@ -449,16 +443,12 @@ impl CodebaseIndexManager {
     }
 
     #[cfg(feature = "local_fs")]
-    fn handle_watcher_event(
+    fn handle_repository_update(
         &mut self,
-        event: &BulkFilesystemWatcherEvent,
+        event: RepositoryIndexUpdate,
         ctx: &mut ModelContext<Self>,
     ) {
-        let updates_by_root = self.group_file_events(event);
-
-        for (root_path, changed_files) in updates_by_root {
-            self.incremental_update_codebase_index(root_path, changed_files, ctx);
-        }
+        self.incremental_update_codebase_index(event.root_path, event.changed_files, ctx);
     }
 
     pub fn handle_active_session_changed(&mut self, active_directory: &Path) {
@@ -571,35 +561,51 @@ impl CodebaseIndexManager {
     }
 
     #[cfg(feature = "local_fs")]
-    fn watch_path(
-        &self,
+    fn subscribe_to_repository_updates(
+        &mut self,
         root_path: &Path,
-        gitignores: Arc<Vec<Gitignore>>,
+        repository: ModelHandle<Repository>,
         ctx: &mut ModelContext<Self>,
     ) {
-        let watch_filter = WatchFilter::with_filter(Arc::new(move |path| {
-            path_passes_filters(path, gitignores.as_slice())
-        }));
-        self.watcher.update(ctx, |watcher, _ctx| {
-            std::mem::drop(watcher.register_path(
-                root_path,
-                watch_filter,
-                RecursiveMode::Recursive,
-            ));
+        let root_path = dunce::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
+        if self.repository_subscriptions.contains_key(&root_path) {
+            return;
+        }
+
+        let subscriber = CodebaseIndexRepositorySubscriber {
+            root_path: root_path.clone(),
+            repository_update_tx: self.repository_update_tx.clone(),
+        };
+        let start = repository.update(ctx, |repository, ctx| {
+            repository.start_watching(Box::new(subscriber), ctx)
         });
+        let subscriber_id = start.subscriber_id;
+        std::mem::drop(start.registration_future);
+
+        self.repository_subscriptions.insert(
+            root_path,
+            RepositorySubscription {
+                repository,
+                subscriber_id,
+            },
+        );
     }
 
     #[cfg(feature = "local_fs")]
-    fn unwatch_path(&self, root_path: &Path, ctx: &mut ModelContext<Self>) {
-        self.watcher.update(ctx, |watcher, _ctx| {
-            std::mem::drop(watcher.unregister_path(root_path));
-        });
+    fn unsubscribe_from_repository_updates(&mut self, root_path: &Path, ctx: &mut ModelContext<Self>) {
+        let root_path = dunce::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
+        if let Some(subscription) = self.repository_subscriptions.remove(&root_path) {
+            subscription.repository.update(ctx, |repository, ctx| {
+                repository.stop_watching(subscription.subscriber_id, ctx);
+            });
+        }
     }
 
     #[cfg(feature = "local_fs")]
-    fn unwatch_all_paths(&self, ctx: &mut ModelContext<Self>) {
-        for path in self.get_codebase_paths() {
-            self.unwatch_path(path, ctx);
+    fn unsubscribe_from_all_repository_updates(&mut self, ctx: &mut ModelContext<Self>) {
+        let paths = self.repository_subscriptions.keys().cloned().collect_vec();
+        for path in paths {
+            self.unsubscribe_from_repository_updates(&path, ctx);
         }
     }
 
@@ -641,6 +647,9 @@ impl CodebaseIndexManager {
 
         let canonical_key =
             dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+
+        #[cfg(feature = "local_fs")]
+        self.subscribe_to_repository_updates(&canonical_key, handle.clone(), ctx);
 
         let index = self
             .codebase_indices
@@ -767,8 +776,7 @@ impl CodebaseIndexManager {
                 repo_root_path,
                 gitignores,
             } => {
-                self.unwatch_path(repo_root_path, ctx);
-                self.watch_path(repo_root_path, gitignores.clone(), ctx);
+                let _ = (repo_root_path, gitignores, ctx);
             }
             CodebaseIndexEvent::LocalIndexBuilt { repo_root_path } => {
                 self.on_index_build_finished(repo_root_path, ctx);
@@ -1012,4 +1020,75 @@ impl Entity for CodebaseIndexManager {
     type Event = CodebaseIndexManagerEvent;
 }
 
+#[cfg(feature = "local_fs")]
+impl RepositorySubscriber for CodebaseIndexRepositorySubscriber {
+    fn on_scan(
+        &mut self,
+        _repository: &Repository,
+        _ctx: &mut ModelContext<Repository>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        Box::pin(async {})
+    }
+
+    fn on_files_updated(
+        &mut self,
+        _repository: &Repository,
+        update: &repo_metadata::RepositoryUpdate,
+        _ctx: &mut ModelContext<Repository>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        let _ = self
+            .repository_update_tx
+            .unbounded_send(RepositoryIndexUpdate {
+                root_path: self.root_path.clone(),
+                changed_files: CodebaseIndexManager::changed_files_from_repository_update(update),
+            });
+        Box::pin(async {})
+    }
+}
+
 impl SingletonEntity for CodebaseIndexManager {}
+
+#[cfg(test)]
+mod tests {
+    use super::CodebaseIndexManager;
+    use repo_metadata::{RepositoryUpdate, TargetFile};
+    use std::path::PathBuf;
+
+    #[test]
+    fn repository_updates_convert_to_changed_files() {
+        let update = RepositoryUpdate {
+            added: [TargetFile::new(PathBuf::from("/tmp/a.rs"), false)]
+                .into_iter()
+                .collect(),
+            modified: [TargetFile::new(PathBuf::from("/tmp/b.rs"), false)]
+                .into_iter()
+                .collect(),
+            deleted: [TargetFile::new(PathBuf::from("/tmp/c.rs"), false)]
+                .into_iter()
+                .collect(),
+            moved: [(
+                TargetFile::new(PathBuf::from("/tmp/new.rs"), false),
+                TargetFile::new(PathBuf::from("/tmp/old.rs"), false),
+            )]
+            .into_iter()
+            .collect(),
+            ..RepositoryUpdate::default()
+        };
+
+        let changed = CodebaseIndexManager::changed_files_from_repository_update(&update);
+
+        let expected_upsertions = [
+            PathBuf::from("/tmp/a.rs"),
+            PathBuf::from("/tmp/b.rs"),
+            PathBuf::from("/tmp/new.rs"),
+        ]
+        .into_iter()
+        .collect();
+        let expected_deletions = [PathBuf::from("/tmp/c.rs"), PathBuf::from("/tmp/old.rs")]
+            .into_iter()
+            .collect();
+
+        assert_eq!(changed.upsertions, expected_upsertions);
+        assert_eq!(changed.deletions, expected_deletions);
+    }
+}

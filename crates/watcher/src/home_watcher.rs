@@ -21,7 +21,11 @@ pub struct HomeDirectoryWatcher {
 impl HomeDirectoryWatcher {
     pub fn new(home_dir: PathBuf, ctx: &mut ModelContext<Self>) -> Self {
         let watcher = ctx.add_model(|ctx| {
-            BulkFilesystemWatcher::new(Duration::from_millis(HOME_WATCHER_DEBOUNCE_MILLI_SECS), ctx)
+            BulkFilesystemWatcher::new_named(
+                "watcher::home_directory",
+                Duration::from_millis(HOME_WATCHER_DEBOUNCE_MILLI_SECS),
+                ctx,
+            )
         });
         ctx.subscribe_to_model(&watcher, Self::handle_fs_event);
 
@@ -39,7 +43,9 @@ impl HomeDirectoryWatcher {
 
     /// Test-only constructor that uses a stub filesystem watcher with no background thread,
     pub fn new_for_test(ctx: &mut ModelContext<Self>) -> Self {
-        let watcher = ctx.add_model(|_| BulkFilesystemWatcher::new_for_test());
+        let watcher = ctx.add_model(|_| {
+            BulkFilesystemWatcher::new_for_test_named("watcher::home_directory")
+        });
         Self { _watcher: watcher }
     }
 

@@ -2,7 +2,10 @@ use std::{
     collections::{HashMap, HashSet},
     future::Future,
     path::{Path, PathBuf},
-    sync::mpsc::{self, channel},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{self, channel},
+    },
     thread,
     time::Duration,
 };
@@ -23,7 +26,99 @@ use notify_debouncer_full::{
 };
 use warpui::{Entity, ModelContext};
 
+static NEXT_WATCHER_INSTANCE_ID: AtomicUsize = AtomicUsize::new(1);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RegistrationKey {
+    path: PathBuf,
+    recursive_mode: RecursiveMode,
+}
+
+#[derive(Debug, Default)]
+struct RegistrationDiagnostics {
+    total_register_requests: usize,
+    total_unregister_requests: usize,
+    duplicate_register_requests: usize,
+    unmatched_unregister_requests: usize,
+    path_refcounts: HashMap<PathBuf, usize>,
+    registrations: HashMap<RegistrationKey, usize>,
+}
+
 #[derive(Debug)]
+struct RegisterStats {
+    normalized_path: PathBuf,
+    refcount_for_registration: usize,
+    duplicate_registration: bool,
+}
+
+#[derive(Debug)]
+struct UnregisterStats {
+    normalized_path: PathBuf,
+    refcount_for_path_after_remove: usize,
+    unmatched_unregister: bool,
+}
+
+impl RegistrationDiagnostics {
+    fn normalize_path(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    fn record_register(&mut self, path: &Path, recursive_mode: RecursiveMode) -> RegisterStats {
+        self.total_register_requests += 1;
+
+        let normalized_path = Self::normalize_path(path);
+        let key = RegistrationKey {
+            path: normalized_path.clone(),
+            recursive_mode,
+        };
+
+        let path_refcount = self.path_refcounts.entry(normalized_path.clone()).or_default();
+        *path_refcount += 1;
+
+        let refcount_for_registration = self.registrations.entry(key).or_default();
+        *refcount_for_registration += 1;
+        let duplicate_registration = *refcount_for_registration > 1;
+        if duplicate_registration {
+            self.duplicate_register_requests += 1;
+        }
+
+        RegisterStats {
+            normalized_path,
+            refcount_for_registration: *refcount_for_registration,
+            duplicate_registration,
+        }
+    }
+
+    fn record_unregister(&mut self, path: &Path) -> UnregisterStats {
+        self.total_unregister_requests += 1;
+
+        let normalized_path = Self::normalize_path(path);
+        let mut unmatched_unregister = false;
+        let refcount_for_path_after_remove = match self.path_refcounts.get_mut(&normalized_path) {
+            Some(refcount) => {
+                *refcount -= 1;
+                let remaining = *refcount;
+                if remaining == 0 {
+                    self.path_refcounts.remove(&normalized_path);
+                    self.registrations.retain(|key, _| key.path != normalized_path);
+                }
+                remaining
+            }
+            None => {
+                self.unmatched_unregister_requests += 1;
+                unmatched_unregister = true;
+                0
+            }
+        };
+
+        UnregisterStats {
+            normalized_path,
+            refcount_for_path_after_remove,
+            unmatched_unregister,
+        }
+    }
+}
+
 enum BackgroundFileWatcherCommand {
     AddPath {
         path: PathBuf,
@@ -40,6 +135,9 @@ enum BackgroundFileWatcherCommand {
 struct BackgroundFileWatcher {
     notifier: Debouncer<RecommendedWatcher, NoCache>,
     rx: mpsc::Receiver<BackgroundFileWatcherCommand>,
+    instance_id: usize,
+    debug_label: String,
+    diagnostics: RegistrationDiagnostics,
 }
 
 impl BackgroundFileWatcher {
@@ -47,6 +145,8 @@ impl BackgroundFileWatcher {
         debounce_duration: Duration,
         handler: WatcherEventHandler,
         rx: mpsc::Receiver<BackgroundFileWatcherCommand>,
+        instance_id: usize,
+        debug_label: String,
     ) -> Self {
         let debounced_watcher = new_debouncer_opt(
             debounce_duration,
@@ -60,6 +160,9 @@ impl BackgroundFileWatcher {
         Self {
             notifier: debounced_watcher,
             rx,
+            instance_id,
+            debug_label,
+            diagnostics: RegistrationDiagnostics::default(),
         }
     }
 
@@ -73,28 +176,68 @@ impl BackgroundFileWatcher {
                     response,
                     recursive_mode,
                 } => {
+                    let stats = self.diagnostics.record_register(&path, recursive_mode);
+                    log::debug!(
+                        "[fs_watcher:{}#{}] register path={} recursive_mode={recursive_mode:?} duplicate_registration={} refcount_for_registration={} active_unique_paths={} active_unique_registrations={} total_register_requests={} duplicate_register_requests={}",
+                        self.debug_label,
+                        self.instance_id,
+                        stats.normalized_path.display(),
+                        stats.duplicate_registration,
+                        stats.refcount_for_registration,
+                        self.diagnostics.path_refcounts.len(),
+                        self.diagnostics.registrations.len(),
+                        self.diagnostics.total_register_requests,
+                        self.diagnostics.duplicate_register_requests,
+                    );
+
                     let _ = response.send(
                         self.notifier
                             .watch_filtered(path, recursive_mode, filter)
                             .inspect_err(|err| {
-                                log::warn!("Failed to watch path: {err:?}");
+                                log::warn!(
+                                    "[fs_watcher:{}#{}] Failed to watch path: {err:?}",
+                                    self.debug_label,
+                                    self.instance_id,
+                                );
                             })
                             .map_err(anyhow::Error::new),
                     );
                 }
                 BackgroundFileWatcherCommand::RemovePath { path, response } => {
+                    let stats = self.diagnostics.record_unregister(&path);
+                    log::debug!(
+                        "[fs_watcher:{}#{}] unregister path={} unmatched_unregister={} refcount_for_path_after_remove={} active_unique_paths={} active_unique_registrations={} total_unregister_requests={} unmatched_unregister_requests={}",
+                        self.debug_label,
+                        self.instance_id,
+                        stats.normalized_path.display(),
+                        stats.unmatched_unregister,
+                        stats.refcount_for_path_after_remove,
+                        self.diagnostics.path_refcounts.len(),
+                        self.diagnostics.registrations.len(),
+                        self.diagnostics.total_unregister_requests,
+                        self.diagnostics.unmatched_unregister_requests,
+                    );
+
                     let _ = response.send(
                         self.notifier
                             .unwatch(path)
                             .inspect_err(|err| {
-                                log::warn!("Failed to remove repo watcher: {err:?}");
+                                log::warn!(
+                                    "[fs_watcher:{}#{}] Failed to remove repo watcher: {err:?}",
+                                    self.debug_label,
+                                    self.instance_id,
+                                );
                             })
                             .map_err(anyhow::Error::new),
                     );
                 }
             }
         }
-        log::debug!("File watcher stream closed")
+        log::debug!(
+            "[fs_watcher:{}#{}] File watcher stream closed",
+            self.debug_label,
+            self.instance_id,
+        )
     }
 }
 
@@ -141,19 +284,35 @@ pub struct BulkFilesystemWatcher {
 }
 
 impl BulkFilesystemWatcher {
+    fn next_instance_id() -> usize {
+        NEXT_WATCHER_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
+    }
+
     pub fn new(debounce_duration: Duration, ctx: &mut ModelContext<Self>) -> Self {
+        Self::new_named("bulk_filesystem_watcher", debounce_duration, ctx)
+    }
+
+    pub fn new_named(
+        debug_label: impl Into<String>,
+        debounce_duration: Duration,
+        ctx: &mut ModelContext<Self>,
+    ) -> Self {
+        let debug_label = debug_label.into();
+        let instance_id = Self::next_instance_id();
         let (tx, rx) = async_channel::unbounded();
         let (bg_tx, bg_rx) = channel();
 
         // Note that we keep the file watcher in the background since registering and unregistering file path
         // involves fs calls.
         if let Err(e) = thread::Builder::new()
-            .name("Bulk Filesystem Watcher".into())
+            .name(format!("Bulk Filesystem Watcher {debug_label}#{instance_id}"))
             .spawn(move || {
                 let watcher = BackgroundFileWatcher::new(
                     debounce_duration,
                     WatcherEventHandler { tx },
                     bg_rx,
+                    instance_id,
+                    debug_label,
                 );
                 watcher.run();
             })
@@ -166,6 +325,10 @@ impl BulkFilesystemWatcher {
     }
 
     pub fn new_for_test() -> Self {
+        Self::new_for_test_named("bulk_filesystem_watcher")
+    }
+
+    pub fn new_for_test_named(_debug_label: impl Into<String>) -> Self {
         let (bg_tx, _) = channel();
         Self { tx: bg_tx }
     }
@@ -375,4 +538,63 @@ fn deduplicate_and_merge_raw_notifier_events(
     }
 
     Ok(update)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RegistrationDiagnostics;
+    use notify_debouncer_full::notify::RecursiveMode;
+    use std::path::Path;
+
+    #[test]
+    fn registration_diagnostics_tracks_duplicate_registrations() {
+        let mut diagnostics = RegistrationDiagnostics::default();
+        let path = Path::new("/tmp/warp-watcher-diagnostics");
+
+        let first = diagnostics.record_register(path, RecursiveMode::Recursive);
+        assert!(!first.duplicate_registration);
+        assert_eq!(first.refcount_for_registration, 1);
+        assert_eq!(diagnostics.duplicate_register_requests, 0);
+        assert_eq!(diagnostics.path_refcounts.len(), 1);
+        assert_eq!(diagnostics.registrations.len(), 1);
+
+        let second = diagnostics.record_register(path, RecursiveMode::Recursive);
+        assert!(second.duplicate_registration);
+        assert_eq!(second.refcount_for_registration, 2);
+        assert_eq!(diagnostics.duplicate_register_requests, 1);
+        assert_eq!(diagnostics.path_refcounts.len(), 1);
+        assert_eq!(diagnostics.registrations.len(), 1);
+    }
+
+    #[test]
+    fn registration_diagnostics_tracks_unmatched_unregisters() {
+        let mut diagnostics = RegistrationDiagnostics::default();
+        let path = Path::new("/tmp/warp-watcher-diagnostics-missing");
+
+        let stats = diagnostics.record_unregister(path);
+        assert!(stats.unmatched_unregister);
+        assert_eq!(stats.refcount_for_path_after_remove, 0);
+        assert_eq!(diagnostics.unmatched_unregister_requests, 1);
+    }
+
+    #[test]
+    fn registration_diagnostics_clears_path_once_refcount_reaches_zero() {
+        let mut diagnostics = RegistrationDiagnostics::default();
+        let path = Path::new("/tmp/warp-watcher-diagnostics-clear");
+
+        diagnostics.record_register(path, RecursiveMode::Recursive);
+        diagnostics.record_register(path, RecursiveMode::Recursive);
+
+        let first_remove = diagnostics.record_unregister(path);
+        assert!(!first_remove.unmatched_unregister);
+        assert_eq!(first_remove.refcount_for_path_after_remove, 1);
+        assert_eq!(diagnostics.path_refcounts.len(), 1);
+        assert_eq!(diagnostics.registrations.len(), 1);
+
+        let second_remove = diagnostics.record_unregister(path);
+        assert!(!second_remove.unmatched_unregister);
+        assert_eq!(second_remove.refcount_for_path_after_remove, 0);
+        assert!(diagnostics.path_refcounts.is_empty());
+        assert!(diagnostics.registrations.is_empty());
+    }
 }
