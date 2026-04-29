@@ -13,9 +13,13 @@ pub mod workspace;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::get_relevant_files::api::{GetRelevantFiles, GetRelevantFilesResponse};
 use crate::ai::predict::generate_ai_input_suggestions;
-use crate::ai::predict::generate_ai_input_suggestions::GenerateAIInputSuggestionsRequest;
+use crate::ai::predict::generate_ai_input_suggestions::{
+    GenerateAIInputSuggestionsRequest, GenerateAIInputSuggestionsResponseV2,
+};
 use crate::ai::predict::generate_am_query_suggestions;
-use crate::ai::predict::generate_am_query_suggestions::GenerateAMQuerySuggestionsRequest;
+use crate::ai::predict::generate_am_query_suggestions::{
+    GenerateAMQuerySuggestionsRequest, GenerateAMQuerySuggestionsResponse, SimpleQuery, Suggestion,
+};
 use crate::ai::predict::predict_am_queries::{PredictAMQueriesRequest, PredictAMQueriesResponse};
 use crate::ai::voice::transcribe::{TranscribeRequest, TranscribeResponse};
 use crate::auth::auth_manager::AuthManager;
@@ -181,6 +185,104 @@ pub enum AIApiError {
         #[source]
         source: anyhow::Error,
     },
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalNextCommandSuggestionPayload {
+    most_likely_action: String,
+    #[serde(default)]
+    commands: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalPromptSuggestionPayload {
+    #[serde(default)]
+    query: String,
+}
+
+fn local_next_command_prompt(request: &GenerateAIInputSuggestionsRequest) -> String {
+    let prefix_constraint = request
+        .prefix
+        .as_ref()
+        .map(|prefix| {
+            format!(
+                "The suggested command MUST start with this exact prefix: {:?}.",
+                prefix
+            )
+        })
+        .unwrap_or_else(|| "Return the single best next shell command to run.".to_string());
+
+    format!(
+        "You generate the user's next shell command. Return ONLY valid JSON with this exact shape: {{\"most_likely_action\":string,\"commands\":[string]}}. The command must be a single shell command with no markdown fences and no prose. If you provide commands, put the best command first. {prefix_constraint}\n\nSystem context:\n{}\n\nRecent terminal context:\n{}\n\nRelevant history context:\n{}\n\nPreviously rejected suggestions:\n{}\n\nPrevious result:\n{}",
+        request.system_context.clone().unwrap_or_default(),
+        request.context_messages.join("\n"),
+        request.history_context,
+        serde_json::to_string(&request.rejected_suggestions).unwrap_or_else(|_| "[]".to_string()),
+        serde_json::to_string(&request.previous_result).unwrap_or_else(|_| "null".to_string()),
+    )
+}
+
+fn parse_local_next_command_response(
+    content: &str,
+) -> Result<GenerateAIInputSuggestionsResponseV2, AIApiError> {
+    let payload: LocalNextCommandSuggestionPayload =
+        serde_json::from_str(ai::strip_json_markdown_fences(content)).map_err(|err| {
+            AIApiError::Other(anyhow!(
+                "failed to parse local next command response: {err}"
+            ))
+        })?;
+
+    let most_likely_action = payload.most_likely_action.trim().to_string();
+    if most_likely_action.is_empty() {
+        return Err(AIApiError::Other(anyhow!(
+            "local next command response was empty"
+        )));
+    }
+
+    let mut commands: Vec<String> = payload
+        .commands
+        .into_iter()
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty())
+        .collect();
+    if commands.is_empty() {
+        commands.push(most_likely_action.clone());
+    }
+
+    Ok(GenerateAIInputSuggestionsResponseV2 {
+        commands,
+        ai_queries: vec![],
+        most_likely_action,
+    })
+}
+
+fn local_prompt_suggestion_prompt(request: &GenerateAMQuerySuggestionsRequest) -> String {
+    format!(
+        "You suggest one helpful natural-language follow-up query for an AI terminal assistant after a user runs a shell command. Return ONLY valid JSON with this exact shape: {{\"query\":string}}. The query should be concise and action-oriented. If there is no useful suggestion, return {{\"query\":\"\"}}. Do not include markdown fences or prose.\n\nSystem context:\n{}\n\nRecent command context:\n{}\n\nExit code: {}",
+        request.system_context.clone().unwrap_or_default(),
+        request.context_messages.join("\n"),
+        request.exit_code,
+    )
+}
+
+fn parse_local_prompt_suggestion_response(
+    content: &str,
+) -> Result<GenerateAMQuerySuggestionsResponse, AIApiError> {
+    let payload: LocalPromptSuggestionPayload =
+        serde_json::from_str(ai::strip_json_markdown_fences(content)).map_err(|err| {
+            AIApiError::Other(anyhow!(
+                "failed to parse local prompt suggestion response: {err}"
+            ))
+        })?;
+
+    let query = payload.query.trim().to_string();
+    Ok(GenerateAMQuerySuggestionsResponse {
+        id: format!("local-{}", chrono::Utc::now().timestamp_millis()),
+        suggestion: (!query.is_empty()).then_some(Suggestion::Simple(SimpleQuery {
+            query,
+            should_plan_task: false,
+        })),
+    })
 }
 
 impl From<http_client::ResponseError> for AIApiError {
@@ -912,6 +1014,13 @@ impl ServerApi {
         request: &GenerateAIInputSuggestionsRequest,
     ) -> Result<generate_ai_input_suggestions::GenerateAIInputSuggestionsResponseV2, AIApiError>
     {
+        if ai::load_local_ai_config().is_some() {
+            let content = self
+                .generate_local_openai_text(local_next_command_prompt(request))
+                .await?;
+            return parse_local_next_command_response(&content);
+        }
+
         let auth_token = self.get_or_refresh_access_token().await?;
 
         let request_builder = self.client.post(format!(
@@ -962,6 +1071,13 @@ impl ServerApi {
         &self,
         request: &GenerateAMQuerySuggestionsRequest,
     ) -> Result<generate_am_query_suggestions::GenerateAMQuerySuggestionsResponse, AIApiError> {
+        if ai::load_local_ai_config().is_some() {
+            let content = self
+                .generate_local_openai_text(local_prompt_suggestion_prompt(request))
+                .await?;
+            return parse_local_prompt_suggestion_response(&content);
+        }
+
         let auth_token = self.get_or_refresh_access_token().await?;
 
         cfg_if::cfg_if! {
@@ -1402,3 +1518,41 @@ impl Entity for ServerApiProvider {
 }
 
 impl SingletonEntity for ServerApiProvider {}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_local_next_command_response, parse_local_prompt_suggestion_response};
+
+    #[test]
+    fn test_parse_local_next_command_response() {
+        let response = parse_local_next_command_response(
+            r#"```json
+{
+  "most_likely_action": "git status",
+  "commands": ["git status", "git diff --stat"]
+}
+```"#,
+        )
+        .expect("expected parsed local next command response");
+
+        assert_eq!(response.most_likely_action, "git status");
+        assert_eq!(response.commands[0], "git status");
+    }
+
+    #[test]
+    fn test_parse_local_prompt_suggestion_response() {
+        let response = parse_local_prompt_suggestion_response(
+            r#"{"query":"explain why the last command failed"}"#,
+        )
+        .expect("expected parsed local prompt suggestion response");
+
+        let suggestion = response.suggestion.expect("expected suggestion");
+        match suggestion {
+            crate::ai::predict::generate_am_query_suggestions::Suggestion::Simple(simple) => {
+                assert_eq!(simple.query, "explain why the last command failed");
+                assert!(!simple.should_plan_task);
+            }
+            other => panic!("unexpected suggestion variant: {other:?}"),
+        }
+    }
+}

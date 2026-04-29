@@ -729,6 +729,42 @@ define_settings_group!(AISettings, settings: [
         toml_path: "agents.warp_agent.active_ai.enabled",
         description: "Controls whether proactive AI features like suggestions are enabled.",
     },
+    local_ai_enabled: LocalAIEnabled {
+        type: bool,
+        default: false,
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Never,
+        private: false,
+        toml_path: "agents.local_ai.enabled",
+        description: "Controls whether local AI integrations are enabled.",
+    },
+    local_ai_base_url: LocalAIBaseUrl {
+        type: String,
+        default: String::new(),
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Never,
+        private: false,
+        toml_path: "agents.local_ai.openai_compatible.base_url",
+        description: "Base URL for a local OpenAI-compatible AI endpoint.",
+    },
+    local_ai_model: LocalAIModel {
+        type: String,
+        default: String::new(),
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Never,
+        private: false,
+        toml_path: "agents.local_ai.openai_compatible.model",
+        description: "Model name to use with the local OpenAI-compatible AI endpoint.",
+    },
+    local_ai_api_key: LocalAIApiKey {
+        type: String,
+        default: String::new(),
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Never,
+        private: false,
+        toml_path: "agents.local_ai.openai_compatible.api_key",
+        description: "Optional API key for the local OpenAI-compatible AI endpoint.",
+    },
     // This field should not be referenced directly to lookup autodetection enablement -- use the
     // `is_ai_autodetection_enabled()` getter.
     ai_autodetection_enabled_internal: AIAutoDetectionEnabled {
@@ -1482,14 +1518,26 @@ impl AISettings {
         contains_remote_blocks || contains_restored_remote_blocks
     }
 
+    pub fn is_local_ai_configured(&self) -> bool {
+        !self.local_ai_base_url.value().trim().is_empty()
+            && !self.local_ai_model.value().trim().is_empty()
+    }
+
+    pub fn is_local_ai_enabled(&self) -> bool {
+        *self.local_ai_enabled.value() && self.is_local_ai_configured()
+    }
+
     pub fn is_any_ai_enabled(&self, app: &AppContext) -> bool {
-        // Disable AI for anonymous and logged-out users.
+        let local_ai_enabled = self.is_local_ai_enabled();
+
+        // Disable cloud-backed AI for anonymous and logged-out users, but allow
+        // local AI when it has been explicitly configured.
         let is_anonymous_or_logged_out = AuthStateProvider::as_ref(app)
             .get()
             .is_anonymous_or_logged_out();
 
-        *self.is_any_ai_enabled
-            && !is_anonymous_or_logged_out
+        *self.is_any_ai_enabled.value()
+            && (local_ai_enabled || !is_anonymous_or_logged_out)
             && !self.is_ai_disabled_due_to_remote_session_org_policy(app)
     }
 

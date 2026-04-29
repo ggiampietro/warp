@@ -11,12 +11,14 @@ use std::{
     collections::{HashMap, HashSet},
     time::Duration,
 };
+
+use serde::{Deserialize, Serialize};
 use warp_core::channel::ChannelState;
 use warp_core::{features::FeatureFlag, report_error};
 use warp_multi_agent_api::ConversationData;
 
 use super::auth::AuthClient;
-use super::ServerApi;
+use super::{AIApiError, ServerApi};
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::{
     AIAgentConversationFormat, AIAgentHarness, AIAgentSerializedBlockFormat,
@@ -151,6 +153,166 @@ pub use crate::ai::ambient_agents::{
 };
 
 const AI_ASSISTANT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
+
+#[derive(Debug, Clone)]
+pub(crate) struct LocalAIConfig {
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalAISettingsToml {
+    agents: Option<LocalAIAgentsToml>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalAIAgentsToml {
+    local_ai: Option<LocalAISectionToml>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalAISectionToml {
+    enabled: Option<bool>,
+    openai_compatible: Option<LocalAIOpenAICompatibleToml>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalAIOpenAICompatibleToml {
+    base_url: Option<String>,
+    model: Option<String>,
+    api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalOpenAIChatCompletionRequest {
+    model: String,
+    messages: Vec<LocalOpenAIChatMessage>,
+    temperature: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalOpenAIChatMessage {
+    role: &'static str,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalOpenAIChatCompletionResponse {
+    choices: Vec<LocalOpenAIChatChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalOpenAIChatChoice {
+    message: LocalOpenAIChatResponseMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalOpenAIChatResponseMessage {
+    content: LocalOpenAIMessageContent,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LocalOpenAIMessageContent {
+    Text(String),
+    Parts(Vec<LocalOpenAIMessagePart>),
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalOpenAIMessagePart {
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalGeneratedCommandsPayload {
+    commands: Vec<AIGeneratedCommand>,
+}
+
+pub(crate) fn parse_local_ai_config_from_toml(settings_toml: &str) -> Option<LocalAIConfig> {
+    let parsed: LocalAISettingsToml = toml::from_str(settings_toml).ok()?;
+    let local_ai = parsed.agents?.local_ai?;
+    if !local_ai.enabled.unwrap_or(false) {
+        return None;
+    }
+
+    let openai_compatible = local_ai.openai_compatible?;
+    let base_url = openai_compatible.base_url?.trim().to_string();
+    let model = openai_compatible.model?.trim().to_string();
+    if base_url.is_empty() || model.is_empty() {
+        return None;
+    }
+
+    let api_key = openai_compatible
+        .api_key
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty());
+
+    Some(LocalAIConfig {
+        base_url,
+        model,
+        api_key,
+    })
+}
+
+pub(crate) fn load_local_ai_config() -> Option<LocalAIConfig> {
+    let settings_path = crate::settings::user_preferences_toml_file_path();
+    let settings_toml = std::fs::read_to_string(settings_path).ok()?;
+    parse_local_ai_config_from_toml(&settings_toml)
+}
+
+fn local_openai_command_generation_prompt(prompt: &str) -> String {
+    format!(
+        "Convert the user's request into shell command suggestions. Return ONLY valid JSON with this shape: {{\"commands\":[{{\"command\":string,\"description\":string,\"parameters\":[{{\"id\":string,\"description\":string}}]}}]}}. Return 1 to 5 commands. Prefer safe, practical commands. Do not include markdown fences or prose. User request: {prompt}",
+    )
+}
+
+fn extract_local_openai_message_text(content: LocalOpenAIMessageContent) -> Option<String> {
+    match content {
+        LocalOpenAIMessageContent::Text(text) => Some(text),
+        LocalOpenAIMessageContent::Parts(parts) => {
+            let text = parts
+                .into_iter()
+                .filter_map(|part| part.text)
+                .collect::<String>();
+            (!text.trim().is_empty()).then_some(text)
+        }
+    }
+}
+
+pub(crate) fn strip_json_markdown_fences(content: &str) -> &str {
+    let trimmed = content.trim();
+    if let Some(stripped) = trimmed.strip_prefix("```json") {
+        return stripped
+            .trim()
+            .strip_suffix("```")
+            .unwrap_or(stripped)
+            .trim();
+    }
+    if let Some(stripped) = trimmed.strip_prefix("```") {
+        return stripped
+            .trim()
+            .strip_suffix("```")
+            .unwrap_or(stripped)
+            .trim();
+    }
+    trimmed
+}
+
+fn parse_local_generated_commands_payload(
+    content: &str,
+) -> Result<Vec<AIGeneratedCommand>, GenerateCommandsFromNaturalLanguageError> {
+    let content = strip_json_markdown_fences(content);
+    let payload: LocalGeneratedCommandsPayload = serde_json::from_str(content)
+        .map_err(|_| GenerateCommandsFromNaturalLanguageError::AiProviderError)?;
+
+    if payload.commands.is_empty() {
+        return Err(GenerateCommandsFromNaturalLanguageError::BadPrompt);
+    }
+
+    Ok(payload.commands)
+}
 
 /// A status update for a task, optionally including a platform error code.
 pub struct TaskStatusUpdate {
@@ -979,6 +1141,76 @@ fn into_file_artifact_record(
     }
 }
 
+impl ServerApi {
+    pub(crate) async fn generate_local_openai_text(
+        &self,
+        prompt: String,
+    ) -> Result<String, AIApiError> {
+        let config = load_local_ai_config().ok_or_else(|| anyhow!("local ai is not configured"))?;
+        if prompt.trim().is_empty() {
+            return Err(AIApiError::Other(anyhow!("local ai prompt is empty")));
+        }
+
+        let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
+        let request = LocalOpenAIChatCompletionRequest {
+            model: config.model,
+            messages: vec![LocalOpenAIChatMessage {
+                role: "user",
+                content: prompt,
+            }],
+            temperature: 0.2,
+        };
+
+        let mut request_builder = self.client.post(&url).json(&request);
+        if let Some(api_key) = &config.api_key {
+            request_builder = request_builder.bearer_auth(api_key);
+        }
+
+        let response = request_builder
+            .send()
+            .await
+            .map_err(AIApiError::Transport)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(match status.as_u16() {
+                429 => AIApiError::ServerOverloaded,
+                _ => AIApiError::ErrorStatus(status, body),
+            });
+        }
+
+        let response: LocalOpenAIChatCompletionResponse = response.json().await.map_err(|err| {
+            AIApiError::Deserialization(super::DeserializationError::Transport(err))
+        })?;
+        response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|choice| extract_local_openai_message_text(choice.message.content))
+            .ok_or_else(|| AIApiError::Other(anyhow!("missing local ai response content")))
+    }
+
+    async fn generate_commands_from_natural_language_local(
+        &self,
+        prompt: String,
+    ) -> Result<Vec<AIGeneratedCommand>, GenerateCommandsFromNaturalLanguageError> {
+        let content = self
+            .generate_local_openai_text(local_openai_command_generation_prompt(&prompt))
+            .await
+            .map_err(|err| match err {
+                AIApiError::ServerOverloaded => {
+                    GenerateCommandsFromNaturalLanguageError::RateLimited
+                }
+                AIApiError::ErrorStatus(status, _) if matches!(status.as_u16(), 400 | 422) => {
+                    GenerateCommandsFromNaturalLanguageError::BadPrompt
+                }
+                _ => GenerateCommandsFromNaturalLanguageError::AiProviderError,
+            })?;
+
+        parse_local_generated_commands_payload(&content)
+    }
+}
+
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl AIClient for ServerApi {
@@ -988,6 +1220,12 @@ impl AIClient for ServerApi {
         // TODO: use relevant context from RequestContext and deprecate usage of ai_execution_context
         _ai_execution_context: Option<WarpAiExecutionContext>,
     ) -> Result<Vec<AIGeneratedCommand>, GenerateCommandsFromNaturalLanguageError> {
+        if load_local_ai_config().is_some() {
+            return self
+                .generate_commands_from_natural_language_local(prompt)
+                .await;
+        }
+
         let default_err = GenerateCommandsFromNaturalLanguageError::Other;
 
         let variables = GenerateCommandsVariables {

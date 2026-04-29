@@ -568,7 +568,7 @@ fn should_generate_prompt_suggestions(
     if block_completed.command.trim().is_empty() {
         return false;
     }
-    if !NetworkStatus::as_ref(ctx).is_online() {
+    if !NetworkStatus::as_ref(ctx).is_online() && !AISettings::as_ref(ctx).is_local_ai_enabled() {
         return false;
     }
 

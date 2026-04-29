@@ -1,7 +1,9 @@
 use super::*;
 use crate::{
     ai::request_usage_model::{RequestLimitInfo, RequestLimitRefreshDuration},
+    auth::AuthStateProvider,
     test_util::settings::initialize_settings_for_tests,
+    workspaces::user_workspaces::UserWorkspaces,
 };
 use chrono::Utc;
 use warp_graphql::scalars::time::ServerTimestamp;
@@ -743,6 +745,77 @@ fn test_mark_quota_banner_as_dismissed() {
             assert!(cycle_history[1].banner_state.dismissed);
             // Future cycle should not be dismissed
             assert!(!cycle_history[2].banner_state.dismissed);
+        });
+    });
+}
+
+fn initialize_logged_out_settings_app(app: &mut App) {
+    initialize_settings_for_tests(app);
+    app.add_singleton_model(|_| AuthStateProvider::new_logged_out_for_test());
+    app.add_singleton_model(UserWorkspaces::default_mock);
+}
+
+#[test]
+fn test_is_any_ai_enabled_is_false_when_logged_out_without_local_ai() {
+    App::test((), |mut app| async move {
+        initialize_logged_out_settings_app(&mut app);
+
+        app.read(|ctx| {
+            AISettings::handle(ctx).read(ctx, |settings, _ctx| {
+                assert!(!settings.is_any_ai_enabled(ctx));
+            });
+        });
+    });
+}
+
+#[test]
+fn test_is_any_ai_enabled_is_true_when_logged_out_with_local_ai_configured() {
+    App::test((), |mut app| async move {
+        initialize_logged_out_settings_app(&mut app);
+
+        AISettings::handle(&app).update(&mut app, |settings, ctx| {
+            settings.local_ai_enabled.set_value(true, ctx).unwrap();
+            settings
+                .local_ai_base_url
+                .set_value("http://127.0.0.1:1234/v1".to_string(), ctx)
+                .unwrap();
+            settings
+                .local_ai_model
+                .set_value("qwen2.5-coder".to_string(), ctx)
+                .unwrap();
+        });
+
+        app.read(|ctx| {
+            AISettings::handle(ctx).read(ctx, |settings, _ctx| {
+                assert!(settings.is_any_ai_enabled(ctx));
+                assert!(settings.is_local_ai_configured());
+            });
+        });
+    });
+}
+
+#[test]
+fn test_is_any_ai_enabled_stays_false_when_logged_out_with_incomplete_local_ai_config() {
+    App::test((), |mut app| async move {
+        initialize_logged_out_settings_app(&mut app);
+
+        AISettings::handle(&app).update(&mut app, |settings, ctx| {
+            settings.local_ai_enabled.set_value(true, ctx).unwrap();
+            settings
+                .local_ai_base_url
+                .set_value("http://127.0.0.1:1234/v1".to_string(), ctx)
+                .unwrap();
+            settings
+                .local_ai_model
+                .set_value("   ".to_string(), ctx)
+                .unwrap();
+        });
+
+        app.read(|ctx| {
+            AISettings::handle(ctx).read(ctx, |settings, _ctx| {
+                assert!(!settings.is_local_ai_configured());
+                assert!(!settings.is_any_ai_enabled(ctx));
+            });
         });
     });
 }

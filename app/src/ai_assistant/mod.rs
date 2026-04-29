@@ -81,12 +81,15 @@ impl From<&AskAIType> for OpenedWarpAISource {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AIGeneratedCommand {
     command: String,
     description: String,
+    #[serde(default)]
     parameters: Vec<AIGeneratedCommandParameter>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AIGeneratedCommandParameter {
     id: String,
     description: String,

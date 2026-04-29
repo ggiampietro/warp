@@ -6,7 +6,6 @@ use crate::{
         AI_ASSISTANT_LOGO_COLOR,
     },
     appearance::Appearance,
-    features::FeatureFlag,
     search::{
         command_search::searcher::CommandSearchItemAction,
         data_source::{Query, QueryResult},
@@ -19,6 +18,7 @@ use crate::{
         workflows::fuzzy_match::FuzzyMatchWorkflowResult,
     },
     server::server_api::ai::AIClient,
+    settings::AISettings,
     themes::theme::Blend,
     ui_components::icons::Icon as UIIcon,
     util::color::{ContrastingColor, MinimumAllowedContrast},
@@ -36,8 +36,8 @@ use warpui::{
     AppContext, Element, SingletonEntity,
 };
 
-const OPEN_WARP_AI_ITEM_BODY_TEXT: &str = "Ask Warp AI for command suggestions";
-const TRANSLATE_WITH_WARP_AI_ITEM_BODY_TEXT: &str = "Translate into shell command using Warp AI";
+const OPEN_WARP_AI_ITEM_BODY_TEXT: &str = "Ask AI for command suggestions";
+const TRANSLATE_WITH_WARP_AI_ITEM_BODY_TEXT: &str = "Translate into shell command using AI";
 
 #[derive(Clone, Debug)]
 pub enum WarpAISearchItem {
@@ -73,21 +73,11 @@ impl SearchItem for WarpAISearchItem {
             Some(highlight) => command_search_background.blend(&highlight),
         };
 
-        let icon = if FeatureFlag::AgentMode.is_enabled() {
-            UIIcon::Oz
-                .to_warpui_icon(
-                    appearance
-                        .theme()
-                        .main_text_color(appearance.theme().accent()),
-                )
-                .finish()
-        } else {
-            let color = (AI_ASSISTANT_LOGO_COLOR).on_background(
-                item_background_color.into_solid(),
-                MinimumAllowedContrast::NonText,
-            );
-            UIIcon::AiAssistant.to_warpui_icon(color.into()).finish()
-        };
+        let color = (AI_ASSISTANT_LOGO_COLOR).on_background(
+            item_background_color.into_solid(),
+            MinimumAllowedContrast::NonText,
+        );
+        let icon = UIIcon::AiAssistant.to_warpui_icon(color.into()).finish();
 
         Container::new(
             ConstrainedBox::new(icon)
@@ -140,7 +130,7 @@ impl SearchItem for WarpAISearchItem {
     }
 
     fn accessibility_label(&self) -> String {
-        format!("Warp AI: {}", self.item_body_text())
+        format!("AI: {}", self.item_body_text())
     }
 }
 
@@ -174,8 +164,12 @@ impl SyncDataSource for WarpAIDataSource {
     fn run_query(
         &self,
         query: &Query,
-        _app: &AppContext,
+        app: &AppContext,
     ) -> Result<Vec<QueryResult<Self::Action>>, DataSourceRunErrorWrapper> {
+        if AISettings::as_ref(app).is_local_ai_enabled() {
+            return Ok(vec![]);
+        }
+
         if query.filters.is_empty() {
             Ok(vec![WarpAISearchItem::Translate.into()])
         } else {
@@ -233,6 +227,10 @@ impl AsyncDataSource for WarpAIDataSource {
     }
 
     fn on_query_finished(&self, app: &mut AppContext) {
+        if AISettings::as_ref(app).is_local_ai_enabled() {
+            return;
+        }
+
         AIRequestUsageModel::handle(app).update(app, |request_usage_model, ctx| {
             request_usage_model.refresh_request_usage_async(ctx);
         });

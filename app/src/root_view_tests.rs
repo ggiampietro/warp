@@ -1,7 +1,10 @@
 use warp_core::user_preferences::GetUserPreferences as _;
 use warpui::{App, SingletonEntity};
 
-use super::{has_completed_local_onboarding, RootView, HAS_COMPLETED_ONBOARDING_KEY};
+use super::{
+    has_completed_local_onboarding, should_require_login_after_onboarding, RootView,
+    HAS_COMPLETED_ONBOARDING_KEY,
+};
 use crate::auth::auth_manager::AuthManager;
 use crate::auth::AuthStateProvider;
 use crate::server::server_api::ServerApiProvider;
@@ -22,6 +25,19 @@ fn set_local_onboarding_completed(app: &mut App, completed: bool) {
             )
             .unwrap();
     });
+}
+
+#[test]
+fn test_should_require_login_after_onboarding_only_for_warp_drive() {
+    assert!(!should_require_login_after_onboarding(false, false));
+    assert!(!should_require_login_after_onboarding(true, true));
+
+    let expected = warp_core::features::FeatureFlag::OpenWarpNewSettingsModes.is_enabled();
+    assert_eq!(
+        should_require_login_after_onboarding(false, true),
+        expected,
+        "logged-out users should only be forced through login after onboarding when Warp Drive is enabled"
+    );
 }
 
 /// Regression test for the bug fixed by introducing

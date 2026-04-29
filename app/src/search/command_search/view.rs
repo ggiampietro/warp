@@ -42,7 +42,11 @@ use crate::{
         QueryFilter,
     },
     send_telemetry_from_ctx,
-    server::{ids::ServerId, server_api::ai::AIClient, telemetry::TelemetryEvent},
+    server::{
+        ids::ServerId,
+        server_api::ai::{load_local_ai_config, AIClient},
+        telemetry::TelemetryEvent,
+    },
     settings::AISettings,
     terminal::{
         input::MenuPositioning,
@@ -231,10 +235,15 @@ impl CommandSearchView {
         self.mixer.update(ctx, |mixer, ctx| {
             mixer.reset(ctx);
 
+            let local_ai_enabled = AISettings::as_ref(ctx).is_local_ai_enabled();
+            let any_ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx)
+                || local_ai_enabled
+                || load_local_ai_config().is_some();
+
             // Add data sources in lowest->highest priority order.  If results from two
             // data sources produce the same ranking score, the data source added first
             // will show up higher in the list (i.e.: further away from the input).
-            if AISettings::as_ref(ctx).is_any_ai_enabled(ctx) {
+            if any_ai_enabled {
                 mixer.add_sync_source(
                     WarpAIDataSource::new(self.ai_client.clone(), None),
                     HashSet::from([QueryFilter::NaturalLanguage]),
@@ -258,7 +267,7 @@ impl CommandSearchView {
                 );
 
                 let mut workflows_filters = HashSet::from([QueryFilter::Workflows]);
-                if AISettings::as_ref(ctx).is_any_ai_enabled(ctx) {
+                if any_ai_enabled {
                     workflows_filters.insert(QueryFilter::AgentModeWorkflows);
                 }
 
@@ -294,8 +303,7 @@ impl CommandSearchView {
                 );
             }
 
-            if FeatureFlag::AgentMode.is_enabled() && AISettings::as_ref(ctx).is_any_ai_enabled(ctx)
-            {
+            if FeatureFlag::AgentMode.is_enabled() && any_ai_enabled {
                 mixer.add_sync_source(
                     AIQueriesDataSource::new(),
                     HashSet::from([QueryFilter::PromptHistory]),
@@ -575,11 +583,22 @@ impl CommandSearchView {
         self.search_bar_state.as_ref(app).selected_result_renderer()
     }
 
-    fn render_loading_state(&self, appearance: &Appearance) -> Box<dyn Element> {
+    fn render_loading_state(&self, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
         let muted_color: ColorU = appearance.theme().nonactive_ui_text_color().into();
+        let loading_text = match self
+            .search_bar_state
+            .as_ref(app)
+            .active_visible_query_filter()
+        {
+            Some(QueryFilter::NaturalLanguage) if AISettings::as_ref(app).is_local_ai_enabled() => {
+                "Generating local command suggestions…"
+            }
+            Some(QueryFilter::NaturalLanguage) => "Generating command suggestions…",
+            _ => "Loading...",
+        };
         let text = appearance
             .ui_builder()
-            .span("Loading...")
+            .span(loading_text)
             .with_style(UiComponentStyles {
                 font_size: Some(appearance.monospace_font_size()),
                 font_family_id: Some(appearance.ui_font_family()),
@@ -758,6 +777,28 @@ impl CommandSearchView {
         let selected_index = self.search_bar_state.as_ref(app).selected_index();
         match (&query_result_renderers, selected_index) {
             (Some(query_result_renderers), _) if query_result_renderers.is_empty() => {
+                let is_loading_natural_language_results = self.mixer.as_ref(app).is_loading()
+                    && matches!(
+                        self.search_bar_state
+                            .as_ref(app)
+                            .active_visible_query_filter(),
+                        Some(QueryFilter::NaturalLanguage)
+                    );
+                if is_loading_natural_language_results {
+                    return self.render_loading_state(appearance, app);
+                }
+
+                let should_show_ai_processing_state =
+                    matches!(
+                        self.search_bar_state
+                            .as_ref(app)
+                            .active_visible_query_filter(),
+                        Some(QueryFilter::NaturalLanguage)
+                    ) && self.mixer.as_ref(app).first_data_source_error().is_none();
+                if should_show_ai_processing_state {
+                    return self.render_loading_state(appearance, app);
+                }
+
                 // There are no results to display, so notify the user of that fact.
                 let text = appearance
                     .ui_builder()
@@ -877,7 +918,7 @@ impl CommandSearchView {
                     )
                     .finish()
             }
-            _ => self.render_loading_state(appearance),
+            _ => self.render_loading_state(appearance, app),
         }
     }
 
@@ -1018,7 +1059,7 @@ impl View for CommandSearchView {
         let panel_contents_body = if should_show_zero_state {
             ChildView::new(&self.zero_state_handle).finish()
         } else if mixer.is_loading() && mixer.are_results_empty() {
-            self.render_loading_state(appearance)
+            self.render_loading_state(appearance, app)
         } else {
             self.render_results(appearance, app)
         };

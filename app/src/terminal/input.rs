@@ -5534,9 +5534,10 @@ impl Input {
             return;
         }
 
-        // Don't generate any next command suggestions if there is no internet.
-        // This is needed to prevent generating history-based suggestions.
-        if !NetworkStatus::as_ref(ctx).is_online() {
+        // Cloud-backed next-command suggestions need internet, but local AI can still run
+        // against a localhost endpoint while offline.
+        if !NetworkStatus::as_ref(ctx).is_online() && !AISettings::as_ref(ctx).is_local_ai_enabled()
+        {
             return;
         }
 
@@ -8768,7 +8769,6 @@ impl Input {
 
                 if AISettings::as_ref(ctx).is_any_ai_enabled(ctx)
                     && self.editor_starts_with_command_search_trigger(ctx)
-                    && *edit_origin == EditOrigin::UserTyped
                     && !self.ai_input_model.as_ref(ctx).is_ai_input_enabled()
                 {
                     // If last buffer didn't start with '#' and current buffer does,
@@ -11749,6 +11749,12 @@ impl Input {
             });
         } else if self.should_block_cloud_mode_setup_submission(ctx) {
             return;
+        } else if AISettings::as_ref(ctx).is_any_ai_enabled(ctx)
+            && self.editor_starts_with_command_search_trigger(ctx)
+            && !self.ai_input_model.as_ref(ctx).is_ai_input_enabled()
+        {
+            self.show_ai_command_search(ctx);
+            return;
         } else if FeatureFlag::AgentMode.is_enabled()
             && AISettings::as_ref(ctx).is_any_ai_enabled(ctx)
             && (self.ai_input_model.as_ref(ctx).is_ai_input_enabled()
@@ -13784,7 +13790,10 @@ impl Input {
             ctx.notify();
         });
 
-        ctx.emit(Event::ShowCommandSearch(Default::default()));
+        ctx.emit(Event::ShowCommandSearch(CommandSearchOptions {
+            filter: Some(QueryFilter::NaturalLanguage),
+            init_content: InitContent::FromInputBuffer,
+        }));
 
         let entrypoint = if buffer_starts_with_trigger {
             AICommandSearchEntrypoint::ShortHandTrigger

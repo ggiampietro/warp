@@ -2,7 +2,8 @@ use chrono::TimeZone;
 use chrono::Utc;
 
 use super::{
-    build_list_agent_runs_url, AgentMessageHeader, AgentRunEvent, AgentSource,
+    build_list_agent_runs_url, parse_local_ai_config_from_toml,
+    parse_local_generated_commands_payload, AgentMessageHeader, AgentRunEvent, AgentSource,
     AmbientAgentTaskState, Artifact, ArtifactDownloadResponse, ArtifactType, ExecutionLocation,
     ListRunsResponse, ReadAgentMessageResponse, RunSortBy, RunSortOrder, TaskListFilter,
 };
@@ -880,6 +881,100 @@ fn test_artifact_vec_serialize_deserialize_roundtrip() {
 fn build_list_agent_runs_url_empty_filter() {
     let url = build_list_agent_runs_url(10, &TaskListFilter::default());
     assert_eq!(url, "agent/runs?limit=10");
+}
+
+#[test]
+fn test_parse_local_ai_config_from_toml() {
+    let config = parse_local_ai_config_from_toml(
+        r#"
+[agents.local_ai]
+enabled = true
+
+[agents.local_ai.openai_compatible]
+base_url = "http://127.0.0.1:1234/v1"
+model = "qwen2.5-coder"
+api_key = "secret"
+"#,
+    )
+    .expect("expected local ai config");
+
+    assert_eq!(config.base_url, "http://127.0.0.1:1234/v1");
+    assert_eq!(config.model, "qwen2.5-coder");
+    assert_eq!(config.api_key.as_deref(), Some("secret"));
+}
+
+#[test]
+fn test_parse_local_ai_config_from_toml_returns_none_when_disabled() {
+    let config = parse_local_ai_config_from_toml(
+        r#"
+[agents.local_ai]
+enabled = false
+
+[agents.local_ai.openai_compatible]
+base_url = "http://127.0.0.1:1234/v1"
+model = "qwen2.5-coder"
+"#,
+    );
+
+    assert!(config.is_none());
+}
+
+#[test]
+fn test_parse_local_generated_commands_payload() {
+    let commands = parse_local_generated_commands_payload(
+        r#"{
+  "commands": [
+    {
+      "command": "find . -type f -mtime -1 -size +1M",
+      "description": "Find files changed in the last day over 1MB",
+      "parameters": []
+    }
+  ]
+}"#,
+    )
+    .expect("expected parsed commands");
+
+    assert_eq!(commands.len(), 1);
+
+    let workflow: crate::workflows::workflow::Workflow =
+        commands.into_iter().next().unwrap().into();
+    assert_eq!(
+        workflow.command(),
+        Some("find . -type f -mtime -1 -size +1M")
+    );
+    assert_eq!(
+        workflow.name(),
+        "Find files changed in the last day over 1MB"
+    );
+}
+
+#[test]
+fn test_parse_local_generated_commands_payload_accepts_fenced_json() {
+    let commands = parse_local_generated_commands_payload(
+        r#"```json
+{
+  "commands": [
+    {
+      "command": "ls -la",
+      "description": "List files",
+      "parameters": []
+    }
+  ]
+}
+```"#,
+    )
+    .expect("expected parsed commands");
+
+    assert_eq!(commands.len(), 1);
+}
+
+#[test]
+fn test_parse_local_generated_commands_payload_rejects_empty_command_list() {
+    let result = parse_local_generated_commands_payload(r#"{"commands": []}"#);
+    assert!(matches!(
+        result,
+        Err(crate::ai_assistant::GenerateCommandsFromNaturalLanguageError::BadPrompt)
+    ));
 }
 
 #[test]
