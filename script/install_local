@@ -53,6 +53,15 @@ if [[ "$BOOTSTRAP" == true ]]; then
   ./script/bootstrap
 fi
 
+ensure_cargo_about() {
+  if cargo --list | rg -q '^about\b'; then
+    return
+  fi
+
+  echo "cargo-about is required for bundle license generation; installing..."
+  cargo install --locked cargo-about@0.8.4
+}
+
 newest_match() {
   local pattern=$1
   find "$REPO_ROOT/target" $pattern -print0 | xargs -0 ls -td 2>/dev/null | head -n1
@@ -67,6 +76,7 @@ case "$OS_TYPE" in
       bundle_args+=(--debug)
     fi
 
+    ensure_cargo_about
     ./script/bundle "${bundle_args[@]}"
 
     app_path="$(newest_match "-type d -name WarpOss.app")"
@@ -92,6 +102,7 @@ case "$OS_TYPE" in
       bundle_args+=(--debug)
     fi
 
+    ensure_cargo_about
     ./script/bundle "${bundle_args[@]}"
 
     deb_path="$(newest_match "-type f -name *.deb")"
