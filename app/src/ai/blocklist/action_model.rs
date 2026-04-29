@@ -1047,13 +1047,7 @@ impl BlocklistAIActionModel {
             pending_action.action,
             AIAgentActionType::RequestComputerUse(_)
         ) {
-            send_telemetry_from_ctx!(
-                TelemetryEvent::ComputerUseCancelled {
-                    conversation_id,
-                    ambient_agent_task_id: self.ambient_agent_task_id,
-                },
-                ctx
-            );
+            ();
         }
 
         let result = Arc::new(AIAgentActionResult {

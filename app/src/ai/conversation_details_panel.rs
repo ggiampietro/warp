@@ -712,25 +712,13 @@ impl ConversationDetailsPanel {
                         ai_conversation_id: Some(conversation_id),
                         ..
                     } => {
-                        send_telemetry_from_ctx!(
-                            AgentManagementTelemetryEvent::ConversationOpened {
-                                conversation_id: conversation_id.to_string(),
-                                opened_from: OpenedFrom::DetailsPanel,
-                            },
-                            ctx
-                        );
+                        ();
                     }
                     PanelMode::Task {
                         task_id: Some(task_id),
                         ..
                     } => {
-                        send_telemetry_from_ctx!(
-                            AgentManagementTelemetryEvent::CloudRunOpened {
-                                task_id: task_id.to_string(),
-                                opened_from: OpenedFrom::DetailsPanel,
-                            },
-                            ctx
-                        );
+                        ();
                     }
                     _ => {}
                 }
@@ -740,22 +728,12 @@ impl ConversationDetailsPanel {
                 }
             }
             AgentDetailsButtonEvent::CancelTask { task_id } => {
-                send_telemetry_from_ctx!(
-                    AgentManagementTelemetryEvent::CloudRunCancelled {
-                        task_id: task_id.to_string(),
-                    },
-                    ctx
-                );
+                ();
 
                 cancel_task_with_toast(*task_id, ctx);
             }
             AgentDetailsButtonEvent::ForkConversation { conversation_id } => {
-                send_telemetry_from_ctx!(
-                    AgentManagementTelemetryEvent::ConversationForked {
-                        conversation_id: conversation_id.to_string(),
-                    },
-                    ctx
-                );
+                ();
 
                 ctx.dispatch_typed_action(&WorkspaceAction::ForkAIConversation {
                     conversation_id: *conversation_id,
@@ -776,25 +754,13 @@ impl ConversationDetailsPanel {
                         ai_conversation_id: Some(conversation_id),
                         ..
                     } => {
-                        send_telemetry_from_ctx!(
-                            AgentManagementTelemetryEvent::ConversationLinkCopied {
-                                conversation_id: conversation_id.to_string(),
-                                copied_from: OpenedFrom::DetailsPanel,
-                            },
-                            ctx
-                        );
+                        ();
                     }
                     PanelMode::Task {
                         task_id: Some(task_id),
                         ..
                     } => {
-                        send_telemetry_from_ctx!(
-                            AgentManagementTelemetryEvent::SessionLinkCopied {
-                                task_id: task_id.to_string(),
-                                copied_from: OpenedFrom::DetailsPanel,
-                            },
-                            ctx
-                        );
+                        ();
                     }
                     _ => {}
                 }
@@ -1981,10 +1947,7 @@ impl TypedActionView for ConversationDetailsPanel {
             #[cfg(not(target_family = "wasm"))]
             ConversationDetailsPanelAction::ContinueLocally => {
                 if let Some(conversation_id) = self.continue_locally_conversation_id(ctx) {
-                    send_telemetry_from_ctx!(
-                        AgentManagementTelemetryEvent::DetailsPanelContinueLocally,
-                        ctx
-                    );
+                    ();
                     ctx.dispatch_typed_action(&WorkspaceAction::ContinueConversationLocally {
                         conversation_id,
                     });

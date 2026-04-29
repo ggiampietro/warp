@@ -699,12 +699,7 @@ impl AmbientAgentViewModel {
                         return;
                     }
                     let error_message = err.to_string();
-                    send_telemetry_from_ctx!(
-                        CloudAgentTelemetryEvent::DispatchFailed {
-                            error: error_message.clone()
-                        },
-                        ctx
-                    );
+                    ();
 
                     // Check if this is a ClientError with an auth_url
                     use crate::server::server_api::ClientError;

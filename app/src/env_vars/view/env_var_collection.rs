@@ -1500,10 +1500,7 @@ impl TypedActionView for EnvVarCollectionView {
             }
             EnvVarCollectionAction::Untrash => self.untrash_env_var_collection(ctx),
             EnvVarCollectionAction::CopyLink(link) => {
-                send_telemetry_from_ctx!(
-                    TelemetryEvent::ObjectLinkCopied { link: link.clone() },
-                    ctx
-                );
+                ();
                 ctx.clipboard()
                     .write(ClipboardContent::plain_text(link.to_owned()));
             }

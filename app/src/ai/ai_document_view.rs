@@ -1054,10 +1054,7 @@ impl TypedActionView for AIDocumentView {
             AIDocumentAction::Export => self.export(ctx),
             AIDocumentAction::CreateWarpDriveNotebook => self.create_warp_drive_notebook(ctx),
             AIDocumentAction::CopyLink(link) => {
-                send_telemetry_from_ctx!(
-                    TelemetryEvent::ObjectLinkCopied { link: link.clone() },
-                    ctx
-                );
+                ();
                 ctx.clipboard()
                     .write(ClipboardContent::plain_text(link.to_owned()));
 

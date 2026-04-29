@@ -184,11 +184,7 @@ impl TelemetryCollector {
                     if let LocalResult::Single(timestamp) =
                         Utc.timestamp_opt(last_active_timestamp, 0)
                     {
-                        warpui::telemetry::record_app_active_event(
-                            auth_state.user_id().map(|uid| uid.as_string()),
-                            auth_state.anonymous_id(),
-                            timestamp,
-                        );
+                        ();
                     }
                 }
                 Timer::after(ACTIVE_USAGE_DURATION).await;

@@ -114,13 +114,7 @@ impl CodeReviewFindModel {
         ctx: &mut ModelContext<Self>,
     ) {
         self.case_sensitive = case_sensitive;
-        send_telemetry_from_ctx!(
-            CodeReviewTelemetryEvent::FindBarModeChanged {
-                case_sensitive: self.case_sensitive,
-                regex: self.regex,
-            },
-            ctx
-        );
+        ();
         self.run_search(editor_handles, ctx);
     }
 
@@ -131,13 +125,7 @@ impl CodeReviewFindModel {
         ctx: &mut ModelContext<Self>,
     ) {
         self.regex = regex;
-        send_telemetry_from_ctx!(
-            CodeReviewTelemetryEvent::FindBarModeChanged {
-                case_sensitive: self.case_sensitive,
-                regex: self.regex,
-            },
-            ctx
-        );
+        ();
         self.run_search(editor_handles, ctx);
     }
 
@@ -156,7 +144,7 @@ impl CodeReviewFindModel {
             return;
         }
 
-        send_telemetry_from_ctx!(CodeReviewTelemetryEvent::FindNavigated { direction }, ctx);
+        ();
 
         let next_index = if let Some(selected) = &self.selected_match {
             match direction {

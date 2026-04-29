@@ -964,16 +964,7 @@ impl TypedActionView for BillingAndUsagePageView {
                 self.show_addon_credit_modal(ctx);
             }
             BillingAndUsagePageAction::UpdateAutoReloadEnabled { team_uid, enabled } => {
-                send_telemetry_from_ctx!(
-                    TelemetryEvent::AutoReloadToggledFromBillingSettings {
-                        enabled: *enabled,
-                        banner_toggle_flag_enabled: FeatureFlag::BuildPlanAutoReloadBannerToggle
-                            .is_enabled(),
-                        post_purchase_modal_flag_enabled:
-                            FeatureFlag::BuildPlanAutoReloadPostPurchaseModal.is_enabled(),
-                    },
-                    ctx
-                );
+                ();
 
                 let selected_auto_reload_value = if *enabled {
                     self.addon_credits_options

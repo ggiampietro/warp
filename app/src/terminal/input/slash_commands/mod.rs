@@ -243,13 +243,7 @@ impl Input {
                 };
                 let is_in_agent_view = FeatureFlag::AgentView.is_enabled()
                     && self.agent_view_controller.as_ref(ctx).is_fullscreen();
-                send_telemetry_from_ctx!(
-                    TelemetryEvent::SlashCommandAccepted {
-                        command_details: SlashCommandAcceptedDetails::SavedPrompt,
-                        is_in_agent_view,
-                    },
-                    ctx
-                );
+                ();
 
                 self.show_workflows_info_box_on_workflow_selection(
                     WorkflowType::Cloud(Box::new(workflow)),
@@ -873,15 +867,7 @@ impl Input {
 
         let is_in_agent_view = FeatureFlag::AgentView.is_enabled()
             && self.agent_view_controller.as_ref(ctx).is_active();
-        send_telemetry_from_ctx!(
-            TelemetryEvent::SlashCommandAccepted {
-                command_details: SlashCommandAcceptedDetails::StaticCommand {
-                    command_name: command.name.to_owned(),
-                },
-                is_in_agent_view,
-            },
-            ctx
-        );
+        ();
         true
     }
 

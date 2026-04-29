@@ -1045,7 +1045,7 @@ impl TypedActionView for CodeEditorView {
             }
             RevertDiffHunk { line_range } => {
                 if FeatureFlag::RevertDiffHunk.is_enabled() {
-                    send_telemetry_from_ctx!(CodeReviewTelemetryEvent::RevertHunkClicked, ctx);
+                    ();
 
                     // Convert line range to diff hunk index and revert it
                     let hunk_index = self

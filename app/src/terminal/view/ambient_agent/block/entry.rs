@@ -282,12 +282,7 @@ impl TypedActionView for AmbientAgentEntryBlock {
     fn handle_action(&mut self, action: &Self::Action, ctx: &mut ViewContext<Self>) {
         match action {
             AmbientAgentEntryBlockAction::OpenAmbientAgent => {
-                send_telemetry_from_ctx!(
-                    CloudAgentTelemetryEvent::EnteredCloudMode {
-                        entry_point: CloudModeEntryPoint::EntryBlock,
-                    },
-                    ctx
-                );
+                ();
                 if let Some(stack) = self.pane_stack.upgrade(ctx) {
                     stack.update(ctx, |stack, ctx| {
                         stack.push(

@@ -535,22 +535,10 @@ impl ConversationListView {
     fn send_open_telemetry(id: &ConversationOrTaskId, ctx: &mut ViewContext<Self>) {
         match id {
             ConversationOrTaskId::ConversationId(conversation_id) => {
-                send_telemetry_from_ctx!(
-                    AgentManagementTelemetryEvent::ConversationOpened {
-                        conversation_id: conversation_id.to_string(),
-                        opened_from: OpenedFrom::ConversationList,
-                    },
-                    ctx
-                );
+                ();
             }
             ConversationOrTaskId::TaskId(task_id) => {
-                send_telemetry_from_ctx!(
-                    AgentManagementTelemetryEvent::CloudRunOpened {
-                        task_id: task_id.to_string(),
-                        opened_from: OpenedFrom::ConversationList,
-                    },
-                    ctx
-                );
+                ();
             }
         }
     }

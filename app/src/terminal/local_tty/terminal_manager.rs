@@ -577,13 +577,7 @@ impl TerminalManager {
                                 ctx,
                             );
                         }
-                        send_telemetry_from_ctx!(
-                            TelemetryEvent::AgentViewExited {
-                                origin: TelemetryAgentViewEntryOrigin::from(*origin),
-                                was_empty: *final_exchange_count == 0,
-                            },
-                            ctx
-                        );
+                        ();
                     }
                     AgentViewControllerEvent::ExitConfirmed { .. } => {}
                 },
@@ -2459,13 +2453,7 @@ fn get_shell_starter_internal(
             starter,
         } => {
             if let Some(unsupported_shell) = unsupported_shell {
-                send_telemetry_on_executor!(
-                    auth_state,
-                    TelemetryEvent::UnsupportedShell {
-                        shell: unsupported_shell
-                    },
-                    background_executor
-                );
+                ();
             }
 
             ShellStarter::Direct(starter)

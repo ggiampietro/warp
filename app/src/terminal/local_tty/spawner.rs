@@ -195,12 +195,7 @@ impl PtySpawner {
                 report_error!(err);
                 is_fallback = true;
             } else {
-                send_telemetry_from_app_ctx!(
-                    TelemetryEvent::PtySpawned {
-                        mode: PtySpawnMode::TerminalServer
-                    },
-                    ctx
-                );
+                ();
                 return result;
             }
         }
@@ -210,7 +205,7 @@ impl PtySpawner {
         } else {
             PtySpawnMode::Direct
         };
-        send_telemetry_from_app_ctx!(TelemetryEvent::PtySpawned { mode }, ctx);
+        ();
 
         Self::spawn_pty_directly(
             options,

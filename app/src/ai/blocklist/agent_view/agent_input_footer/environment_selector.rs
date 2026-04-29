@@ -168,10 +168,7 @@ impl EnvironmentSelector {
                     .downcast_ref::<NewEnvironmentMenuItem>()
                     .is_some()
                 {
-                    send_telemetry_from_ctx!(
-                        CloudAgentTelemetryEvent::OpenedEnvironmentManagementPane,
-                        ctx
-                    );
+                    ();
                     me.set_menu_visibility(false, ctx);
                     ctx.emit(EnvironmentSelectorEvent::OpenEnvironmentManagementPane);
                     return;
@@ -183,12 +180,7 @@ impl EnvironmentSelector {
                     .as_any()
                     .downcast_ref::<EnvironmentMenuItem>()
                 {
-                    send_telemetry_from_ctx!(
-                        CloudAgentTelemetryEvent::EnvironmentSelected {
-                            environment_id: env_item.id.into_server(),
-                        },
-                        ctx
-                    );
+                    ();
                     if me.is_configuring(ctx) {
                         me.ambient_agent_model.update(ctx, |model, ctx| {
                             model.set_environment_id(Some(env_item.id), ctx);
@@ -249,7 +241,7 @@ impl EnvironmentSelector {
 
         self.is_menu_open = is_open;
         if is_open {
-            send_telemetry_from_ctx!(CloudAgentTelemetryEvent::EnvironmentSelectorOpened, ctx);
+            ();
             ctx.focus(&self.dropdown);
         }
         ctx.emit(EnvironmentSelectorEvent::MenuVisibilityChanged { open: is_open });

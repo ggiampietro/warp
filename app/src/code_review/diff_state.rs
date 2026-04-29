@@ -1509,12 +1509,7 @@ impl DiffStateModel {
                 self.metadata = Some(metadata);
             }
             Err(e) => {
-                send_telemetry_from_ctx!(
-                    CodeReviewTelemetryEvent::CalculateDiffMetadataFailed {
-                        error: e.to_string()
-                    },
-                    ctx
-                );
+                ();
                 self.metadata = None;
             }
         }
@@ -1560,12 +1555,7 @@ impl DiffStateModel {
         }
 
         if let Err(e) = &diffs.changes {
-            send_telemetry_from_ctx!(
-                CodeReviewTelemetryEvent::LoadDiffFailed {
-                    error: e.to_string(),
-                },
-                ctx
-            );
+            ();
         }
 
         self.state = InternalDiffState::Loaded((&diffs).into());

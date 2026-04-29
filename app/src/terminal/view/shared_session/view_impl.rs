@@ -472,16 +472,7 @@ impl TerminalView {
             source_type,
         });
         if let Some(source) = source {
-            send_telemetry_from_ctx!(
-                TelemetryEvent::StartedSharingCurrentSession {
-                    includes_scrollback: !matches!(
-                        scrollback_type,
-                        SharedSessionScrollbackType::None
-                    ),
-                    source,
-                },
-                ctx
-            );
+            ();
         }
     }
 
@@ -560,10 +551,7 @@ impl TerminalView {
     ) {
         ctx.emit(Event::StopSharingCurrentSession { reason });
 
-        send_telemetry_from_ctx!(
-            TelemetryEvent::StoppedSharingCurrentSession { source, reason },
-            ctx
-        );
+        ();
     }
 
     // TODO: why do we need to pass through input replica ID as a separate argument?
@@ -666,13 +654,7 @@ impl TerminalView {
             self.maybe_auto_open_cloud_mode_details_panel(ctx);
         }
 
-        send_telemetry_from_ctx!(
-            TelemetryEvent::JoinedSharedSession {
-                session_id,
-                source_type,
-            },
-            ctx
-        );
+        ();
     }
 
     pub fn rejoin_session_share(&mut self, ctx: &mut ViewContext<Self>) {
@@ -1099,12 +1081,7 @@ impl TerminalView {
             return;
         }
 
-        send_telemetry_from_ctx!(
-            TelemetryEvent::JumpToSharedSessionParticipant {
-                jumped_to: participant_id.clone()
-            },
-            ctx
-        );
+        ();
     }
 
     // If open, ensure that participant avatar context menu is not triggered
@@ -1233,7 +1210,7 @@ impl TerminalView {
             }
         }
 
-        send_telemetry_from_ctx!(TelemetryEvent::WebSessionOpenedOnDesktop { source }, ctx);
+        ();
     }
 
     // Called when viewer receives acknowledgment from server
@@ -1345,7 +1322,7 @@ impl TerminalView {
             toast_stack.add_ephemeral_toast(toast, window_id, ctx);
         });
 
-        send_telemetry_from_ctx!(TelemetryEvent::CopiedSharedSessionLink { source }, ctx);
+        ();
     }
 
     fn insert_shared_session_started_banner(

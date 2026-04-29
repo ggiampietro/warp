@@ -40,7 +40,7 @@ pub struct FileGlobExecutor {
 
 fn log_file_glob_error(conversation_id: AIConversationId, ctx: &mut AppContext) {
     let server_output_id = get_server_output_id(conversation_id, ctx);
-    send_telemetry_from_app_ctx!(TelemetryEvent::FileGlobToolFailed { server_output_id }, ctx);
+    ();
 }
 
 impl FileGlobExecutor {
@@ -150,10 +150,7 @@ impl FileGlobExecutor {
                             log_file_glob_error(conversation_id_clone, ctx);
                         }
                         FileGlobV2Result::Success { .. } => {
-                            send_telemetry_from_app_ctx!(
-                                TelemetryEvent::FileGlobToolSucceeded,
-                                ctx
-                            );
+                            ();
                         }
                         _ => {}
                     }

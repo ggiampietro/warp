@@ -40,16 +40,7 @@ impl ReadSkillExecutor {
 
         match SkillManager::as_ref(ctx).skill_by_reference(skill_ref) {
             Some(skill) => {
-                send_telemetry_from_ctx!(
-                    SkillTelemetryEvent::Read {
-                        reference: skill_ref.clone(),
-                        name: Some(skill.name.clone()),
-                        scope: Some(skill.scope),
-                        provider: Some(skill.provider),
-                        error: false,
-                    },
-                    ctx
-                );
+                ();
                 let content = FileContext::new(
                     skill.path.to_string_lossy().into_owned(),
                     AnyFileContent::StringContent(skill.content.clone()),
@@ -59,16 +50,7 @@ impl ReadSkillExecutor {
                 ActionExecution::Sync(ReadSkillResult::Success { content }.into())
             }
             None => {
-                send_telemetry_from_ctx!(
-                    SkillTelemetryEvent::Read {
-                        reference: skill_ref.clone(),
-                        name: None,
-                        scope: None,
-                        provider: None,
-                        error: true,
-                    },
-                    ctx
-                );
+                ();
                 ActionExecution::Sync(
                     ReadSkillResult::Error(format!("Skill not found: {:?}", skill_ref)).into(),
                 )

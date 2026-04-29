@@ -275,25 +275,6 @@ impl From<&TeamsPageAction> for LoginGatedFeature {
     }
 }
 
-impl TryFrom<&TeamsPageAction> for TelemetryEvent {
-    type Error = anyhow::Error;
-    fn try_from(action: &TeamsPageAction) -> Result<Self, Self::Error> {
-        match action {
-            TeamsPageAction::CopyLink(_) => Ok(TelemetryEvent::TeamLinkCopied),
-            TeamsPageAction::ChangeInviteViewOption(option) => {
-                Ok(TelemetryEvent::ChangedInviteViewOption(*option))
-            }
-            TeamsPageAction::SendEmailInvites { .. } => Ok(TelemetryEvent::SendEmailInvites),
-            // Some Team events are logged from the server so we do not want to log
-            // them from the client as well. For more details see:
-            // https://docs.google.com/document/d/1va3_qfkHtDFKZqYaMgNUn5nwU4f8NByzyhg1uolHlck/edit
-            _ => Err(anyhow::anyhow!(
-                "We do not log this telemetry event from the client."
-            )),
-        }
-    }
-}
-
 #[derive(Clone)]
 pub enum TeamsPageViewEvent {
     TeamsChanged,
@@ -590,9 +571,6 @@ impl TypedActionView for TeamsPageView {
             }
         };
 
-        if let Ok(event) = TelemetryEvent::try_from(action) {
-            send_telemetry_from_ctx!(event, ctx);
-        }
     }
 }
 

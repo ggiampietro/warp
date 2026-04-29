@@ -81,6 +81,7 @@ fn compose_patterns<'a>(
 /// byte length. Overlapping matches (which can occur when multiple patterns match
 /// the same region) are merged before replacement, so each character is replaced
 /// at most once.
+#[allow(dead_code)]
 pub fn redact_secrets_in_string(input: &mut String) {
     let ranges: Vec<Range<usize>> = {
         let regex = TELEMETRY_SECRETS_REGEX.read();
@@ -112,6 +113,7 @@ fn replace_byte_ranges_with_asterisks(input: &mut String, mut ranges: Vec<Range<
 }
 /// Walks a [`Value`] and runs [`redact_secrets_in_string`] on every string within
 /// it. Non-string scalars (numbers, booleans, nulls) are left untouched.
+#[allow(dead_code)]
 pub fn redact_secrets_in_value(value: &mut Value) {
     match value {
         Value::String(s) => redact_secrets_in_string(s),

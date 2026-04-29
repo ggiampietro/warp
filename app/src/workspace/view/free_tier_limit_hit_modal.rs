@@ -439,17 +439,14 @@ impl TypedActionView for FreeTierLimitHitModal {
             FreeTierLimitHitModalAction::Close => {
                 ctx.emit(FreeTierLimitHitModalEvent::Close);
 
-                send_telemetry_from_ctx!(TelemetryEvent::FreeTierLimitHitInterstitialClosed, ctx);
+                ();
             }
             FreeTierLimitHitModalAction::OpenUpgrade => {
                 let upgrade_url = Self::get_upgrade_url(ctx);
                 ctx.open_url(&upgrade_url);
                 ctx.emit(FreeTierLimitHitModalEvent::Close);
 
-                send_telemetry_from_ctx!(
-                    TelemetryEvent::FreeTierLimitHitInterstitialUpgradeButtonClicked,
-                    ctx
-                );
+                ();
             }
             FreeTierLimitHitModalAction::OpenUrl(url) => {
                 ctx.open_url(url);

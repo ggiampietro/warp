@@ -164,10 +164,7 @@ pub fn initialize(ctx: &mut AppContext) -> (Option<PersistedData>, Option<Writer
             let app_state = match read_sqlite_data(&mut conn, user_uid) {
                 Ok(app_state) => Some(app_state),
                 Err(err) => {
-                    send_telemetry_from_app_ctx!(
-                        TelemetryEvent::DatabaseReadError(err.to_string()),
-                        ctx
-                    );
+                    ();
                     report_error!(anyhow::Error::new(err).context("Failed to read app state"));
                     None
                 }
@@ -176,10 +173,7 @@ pub fn initialize(ctx: &mut AppContext) -> (Option<PersistedData>, Option<Writer
             let writer_handles = match start_writer(conn, database_path) {
                 Ok(writer_handles) => Some(writer_handles),
                 Err(err) => {
-                    send_telemetry_from_app_ctx!(
-                        TelemetryEvent::DatabaseWriteError(err.to_string()),
-                        ctx
-                    );
+                    ();
                     report_db_error("starting writer", err, &database_file_path());
                     None
                 }
@@ -187,10 +181,7 @@ pub fn initialize(ctx: &mut AppContext) -> (Option<PersistedData>, Option<Writer
             (app_state, writer_handles)
         }
         Err(err) => {
-            send_telemetry_from_app_ctx!(
-                TelemetryEvent::DatabaseStartUpError(err.to_string()),
-                ctx
-            );
+            ();
             report_db_error("initialization", err, &database_path);
             (None, None)
         }

@@ -136,8 +136,6 @@ pub enum AuthViewBodyAction {
     SignupAnonymousUser,
     ShowOverlay(AuthViewOverlay),
     HideOverlay,
-    ToggleTelemetry,
-    ToggleCrashReporting,
     ToggleCloudConversationStorage,
     Close,
 }
@@ -247,8 +245,6 @@ impl AuthViewBody {
 
     fn privacy_settings_actions(&self) -> PrivacySettingsActions<AuthViewBodyAction> {
         PrivacySettingsActions {
-            toggle_telemetry: AuthViewBodyAction::ToggleTelemetry,
-            toggle_crash_reporting: AuthViewBodyAction::ToggleCrashReporting,
             toggle_cloud_conversation_storage: AuthViewBodyAction::ToggleCloudConversationStorage,
             hide_overlay: AuthViewBodyAction::HideOverlay,
         }
@@ -845,12 +841,7 @@ impl TypedActionView for AuthViewBody {
     fn handle_action(&mut self, action: &AuthViewBodyAction, ctx: &mut ViewContext<Self>) {
         match action {
             AuthViewBodyAction::Login => {
-                send_telemetry_from_ctx!(
-                    TelemetryEvent::LoginButtonClicked {
-                        source: LoginEventSource::AuthModal,
-                    },
-                    ctx
-                );
+                ();
                 self.auth_step = AuthStep::BrowserOpen;
 
                 AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
@@ -859,23 +850,13 @@ impl TypedActionView for AuthViewBody {
                 });
             }
             AuthViewBodyAction::InitiateLoginLater => {
-                send_telemetry_from_ctx!(
-                    TelemetryEvent::LoginLaterButtonClicked {
-                        source: LoginEventSource::AuthModal,
-                    },
-                    ctx
-                );
+                ();
                 self.loginless_step = LoginlessStep::Initiated;
             }
             AuthViewBodyAction::LoginLater => {
                 // Send synchronously since this is an important event in the sign up funnel and we
                 // don't want to lose events if the user quits before the event queue is flushed.
-                send_telemetry_sync_from_ctx!(
-                    TelemetryEvent::LoginLaterConfirmationButtonClicked {
-                        source: LoginEventSource::AuthModal,
-                    },
-                    ctx
-                );
+                ();
                 ctx.emit(AuthViewBodyEvent::LoginLaterClicked);
             }
             AuthViewBodyAction::EnterToken => {
@@ -909,7 +890,7 @@ impl TypedActionView for AuthViewBody {
             AuthViewBodyAction::Signup => {
                 // Send synchronously since this is an important event in the sign up funnel and we
                 // don't want to lose events if the user quits before the event queue is flushed.
-                send_telemetry_sync_from_ctx!(TelemetryEvent::SignUpButtonClicked, ctx);
+                ();
                 self.auth_step = AuthStep::BrowserOpen;
 
                 AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
@@ -942,36 +923,13 @@ impl TypedActionView for AuthViewBody {
             }
             AuthViewBodyAction::ShowOverlay(overlay) => {
                 if let AuthViewOverlay::PrivacySettings = overlay {
-                    send_telemetry_sync_from_ctx!(
-                        TelemetryEvent::OpenAuthPrivacySettings {
-                            source: LoginEventSource::AuthModal,
-                        },
-                        ctx
-                    );
+                    ();
                 }
                 self.active_overlay = Some(*overlay);
                 ctx.notify();
             }
             AuthViewBodyAction::HideOverlay => {
                 self.active_overlay = None;
-                ctx.notify();
-            }
-            AuthViewBodyAction::ToggleTelemetry => {
-                let privacy_settings_handle = PrivacySettings::handle(ctx);
-                ctx.update_model(&privacy_settings_handle, |privacy_settings, ctx| {
-                    privacy_settings
-                        .set_is_telemetry_enabled(!privacy_settings.is_telemetry_enabled, ctx);
-                });
-                ctx.notify();
-            }
-            AuthViewBodyAction::ToggleCrashReporting => {
-                let privacy_settings_handle = PrivacySettings::handle(ctx);
-                ctx.update_model(&privacy_settings_handle, |privacy_settings, ctx| {
-                    privacy_settings.set_is_crash_reporting_enabled(
-                        !privacy_settings.is_crash_reporting_enabled,
-                        ctx,
-                    );
-                });
                 ctx.notify();
             }
             AuthViewBodyAction::ToggleCloudConversationStorage => {

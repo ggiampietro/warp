@@ -1844,15 +1844,7 @@ impl AIConversation {
                 ..
             }
         );
-        send_telemetry_from_ctx!(
-            crate::TelemetryEvent::AgentModeError {
-                identifiers,
-                error: error.to_string(),
-                is_user_visible: true,
-                will_attempt_to_resume,
-            },
-            ctx
-        );
+        ();
 
         for AddedExchange {
             exchange_id,
@@ -2228,12 +2220,7 @@ impl AIConversation {
                                         comments_op.clone(),
                                     );
                                     if resolved_count > 0 {
-                                        send_telemetry_from_ctx!(
-                                            CodeReviewTelemetryEvent::CommentResolved {
-                                                resolved_count
-                                            },
-                                            ctx
-                                        );
+                                        ();
                                     }
                                 } else {
                                     log::error!(

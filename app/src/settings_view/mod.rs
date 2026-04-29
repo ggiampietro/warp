@@ -1879,7 +1879,7 @@ impl SettingsView {
         }
         self.current_settings_page = section;
         if previous_section != section && section == SettingsSection::CloudEnvironments {
-            send_telemetry_from_ctx!(SettingsTelemetryEvent::EnvironmentsPageOpened, ctx);
+            ();
         }
 
         // When navigating to a subpage, update the backing page's active subpage mode
@@ -1910,11 +1910,6 @@ impl SettingsView {
                     }
                 }
             }
-        }
-
-        #[cfg(feature = "crash_reporting")]
-        {
-            crate::crash_reporting::set_tag("warp.settings_page", section.to_string());
         }
 
         if let Some(settings_page) = self.current_settings_page() {
@@ -2509,12 +2504,7 @@ impl TypedActionView for SettingsView {
                 self.set_and_refresh_current_page_internal(*section, false, true, ctx);
 
                 if *section == SettingsSection::MCPServers {
-                    send_telemetry_from_ctx!(
-                        TelemetryEvent::MCPServerCollectionPaneOpened {
-                            entrypoint: MCPServerCollectionPaneEntrypoint::MCPSettingsTab,
-                        },
-                        ctx
-                    );
+                    ();
                 }
             }
             SettingsAction::ToggleUmbrella(nav_index) => {

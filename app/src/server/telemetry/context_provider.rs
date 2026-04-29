@@ -3,9 +3,11 @@ use warpui::{AppContext, ModelContext, SingletonEntity};
 
 use crate::auth::AuthStateProvider;
 
+#[allow(dead_code)]
 pub struct AppTelemetryContextProvider {}
 
 impl AppTelemetryContextProvider {
+    #[allow(dead_code)]
     pub fn new_context_provider(
         _ctx: &mut ModelContext<TelemetryContextModel>,
     ) -> TelemetryContextModel {

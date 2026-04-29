@@ -56,10 +56,7 @@ impl TypedActionView for ChangelogSectionView {
         use SectionAction::*;
         match action {
             OpenUrl(url) => {
-                send_telemetry_from_ctx!(
-                    TelemetryEvent::OpenChangelogLink { url: url.clone() },
-                    ctx
-                );
+                ();
                 ctx.open_url(url.as_str());
             }
             ToggleExpanded => self.toggle_expanded(ctx),

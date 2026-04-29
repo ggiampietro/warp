@@ -852,8 +852,14 @@ pub struct AgentConversationsModel {
     /// Set of view IDs actively consuming this model's data per window.
     /// When a window has at least one consumer, we poll for new tasks while that window is active.
     active_data_consumers_per_window: HashMap<WindowId, HashSet<EntityId>>,
-    /// Whether we have finished the initial task load
+    /// Whether we have finished the initial local load needed to render the Runs view.
+    /// Cloud task hydration is best-effort and should not block local-only AI usage.
     has_finished_initial_load: bool,
+    /// Whether we've already kicked off the one-time cloud bootstrap for ambient agent tasks.
+    /// This is tracked separately from `has_finished_initial_load` so the Runs view can become
+    /// ready immediately for local AI, while still opportunistically hydrating cloud runs once
+    /// auth becomes available.
+    has_attempted_cloud_initial_load: bool,
     /// Task IDs that have been manually opened from the management page.
     /// These will appear in the conversation list even if their source is not user-initiated
     /// (and even after they have been closed).
@@ -896,6 +902,7 @@ impl AgentConversationsModel {
                 next_poll_abort_handle: None,
                 active_data_consumers_per_window: HashMap::new(),
                 has_finished_initial_load: true,
+                has_attempted_cloud_initial_load: true,
                 manually_opened_task_ids: HashSet::new(),
                 task_fetch_state: HashMap::new(),
             };
@@ -934,17 +941,20 @@ impl AgentConversationsModel {
             next_poll_abort_handle: None,
             active_data_consumers_per_window: HashMap::new(),
             has_finished_initial_load: false,
+            has_attempted_cloud_initial_load: false,
             manually_opened_task_ids: HashSet::new(),
             task_fetch_state: HashMap::new(),
         };
 
-        // Only sync local conversations if we're not in CLI mode. Server-side data
-        // (tasks and cloud conversation metadata) is fetched on AuthComplete instead of
-        // here to avoid duplicate requests at startup.
+        // Local conversations are enough to render the Runs view, including local-AI-only usage.
+        // Cloud task hydration is best-effort and should never block page readiness.
         if AppExecutionMode::as_ref(ctx).can_fetch_agent_runs_for_management() {
             model.sync_conversations(ctx);
+            model.has_finished_initial_load = true;
+            model.maybe_fetch_ambient_agent_tasks_and_cloud_convo_metadata(ctx);
         } else {
             model.has_finished_initial_load = true;
+            model.has_attempted_cloud_initial_load = true;
         }
         model
     }
@@ -986,13 +996,13 @@ impl AgentConversationsModel {
         event: &AuthManagerEvent,
         ctx: &mut ModelContext<Self>,
     ) {
-        // When auth completes, retry the initial task sync if we haven't loaded tasks yet
-        // Only sync if we're not in CLI mode
+        // When auth completes, opportunistically hydrate cloud runs if we have not already
+        // kicked off the cloud bootstrap. This stays independent from local page readiness.
         if matches!(event, AuthManagerEvent::AuthComplete)
-            && !self.has_finished_initial_load
+            && !self.has_attempted_cloud_initial_load
             && AppExecutionMode::as_ref(ctx).can_fetch_agent_runs_for_management()
         {
-            self.fetch_ambient_agent_tasks_and_cloud_convo_metadata(ctx);
+            self.maybe_fetch_ambient_agent_tasks_and_cloud_convo_metadata(ctx);
         }
     }
 
@@ -1064,8 +1074,31 @@ impl AgentConversationsModel {
         ctx.emit(AgentConversationsModelEvent::ConversationsLoaded);
     }
 
+    /// Starts the one-time cloud bootstrap if the current app state can support it.
+    /// Returns early for local-only/no-login sessions without affecting page readiness.
+    fn maybe_fetch_ambient_agent_tasks_and_cloud_convo_metadata(
+        &mut self,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if self.has_attempted_cloud_initial_load {
+            return;
+        }
+
+        if AuthStateProvider::as_ref(ctx).get().user_id().is_none() {
+            return;
+        }
+
+        let ai_settings = AISettings::as_ref(ctx);
+        if !ai_settings.is_any_ai_enabled(ctx) {
+            return;
+        }
+
+        self.has_attempted_cloud_initial_load = true;
+        self.fetch_ambient_agent_tasks_and_cloud_convo_metadata(ctx);
+    }
+
     /// Fetches tasks and cloud conversation metadata async. Cloud conversation metadata is merged with
-    /// metadata stored in local db in the BlocklistAIHistoryModel
+    /// metadata stored in local db in the BlocklistAIHistoryModel.
     fn fetch_ambient_agent_tasks_and_cloud_convo_metadata(&mut self, ctx: &mut ModelContext<Self>) {
         let Some(creator_uid) = AuthStateProvider::as_ref(ctx)
             .get()
@@ -1169,8 +1202,6 @@ impl AgentConversationsModel {
             OUT_OF_BAND_REQUEST_RETRY_STRATEGY,
             |model, result, ctx| {
                 if let RequestState::RequestSucceeded((tasks, conversation_metadata)) = result {
-                    model.has_finished_initial_load = true;
-
                     // Update tasks if we got any
                     if !tasks.is_empty() {
                         log::info!("Updating model with {} tasks", tasks.len());
@@ -1196,7 +1227,6 @@ impl AgentConversationsModel {
                     model.update_polling_state(ctx);
                     ctx.emit(AgentConversationsModelEvent::ConversationsLoaded);
                 } else if let RequestState::RequestFailed(e) = result {
-                    model.has_finished_initial_load = true;
                     model.update_polling_state(ctx);
                     report_error!(e);
                 }

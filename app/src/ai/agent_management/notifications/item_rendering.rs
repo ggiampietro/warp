@@ -464,45 +464,25 @@ pub(crate) fn handle_notification_artifact_buttons_event(
 ) {
     match event {
         ArtifactButtonsRowEvent::OpenPlan { notebook_uid } => {
-            send_telemetry_from_ctx!(
-                AgentManagementTelemetryEvent::ArtifactClicked {
-                    artifact_type: ArtifactType::Plan
-                },
-                ctx
-            );
+            ();
             ctx.dispatch_typed_action(&WorkspaceAction::OpenNotebook {
                 id: (*notebook_uid).into(),
             });
         }
         ArtifactButtonsRowEvent::CopyBranch { branch } => {
-            send_telemetry_from_ctx!(
-                AgentManagementTelemetryEvent::ArtifactClicked {
-                    artifact_type: ArtifactType::Branch
-                },
-                ctx
-            );
+            ();
             ctx.clipboard()
                 .write(ClipboardContent::plain_text(branch.clone()));
         }
         ArtifactButtonsRowEvent::OpenPullRequest { url } => {
-            send_telemetry_from_ctx!(
-                AgentManagementTelemetryEvent::ArtifactClicked {
-                    artifact_type: ArtifactType::PullRequest
-                },
-                ctx
-            );
+            ();
             ctx.open_url(url);
         }
         ArtifactButtonsRowEvent::ViewScreenshots { artifact_uids } => {
             open_screenshot_lightbox(artifact_uids, ctx);
         }
         ArtifactButtonsRowEvent::DownloadFile { artifact_uid } => {
-            send_telemetry_from_ctx!(
-                AgentManagementTelemetryEvent::ArtifactClicked {
-                    artifact_type: ArtifactType::File
-                },
-                ctx
-            );
+            ();
             crate::ai::artifacts::download_file_artifact(artifact_uid, ctx);
         }
     }

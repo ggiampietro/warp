@@ -11,6 +11,7 @@ use std::{
 use warp_core::features::FeatureFlag;
 use warpui::{App, EntityId};
 
+use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
 use crate::ai::agent::conversation::{AIConversation, AIConversationId, ConversationStatus};
 use crate::ai::ambient_agents::task::{TaskCreatorInfo, TaskStatusMessage};
 use crate::ai::ambient_agents::AgentConfigSnapshot;
@@ -19,8 +20,11 @@ use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskState};
 use crate::ai::artifacts::Artifact;
 use crate::ai::blocklist::history_model::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
 use crate::ai::conversation_navigation::ConversationNavigationData;
-use crate::auth::AuthStateProvider;
+use crate::auth::{AuthManager, AuthStateProvider};
+use crate::network::NetworkStatus;
+use crate::server::server_api::ServerApiProvider;
 use crate::test_util::ai_agent_tasks::{create_api_task, create_message};
+use crate::test_util::settings::initialize_settings_for_tests;
 
 use super::{
     AgentConversationsModel, AgentConversationsModelEvent, AgentManagementFilters,
@@ -30,6 +34,16 @@ use super::{
 };
 use crate::ai::ambient_agents::task::HarnessConfig;
 use warp_cli::agent::Harness;
+
+fn install_agent_conversations_model_singletons(app: &mut App, auth_state: AuthStateProvider) {
+    initialize_settings_for_tests(app);
+    app.add_singleton_model(|_| auth_state);
+    app.add_singleton_model(|_| ServerApiProvider::new_for_test());
+    app.add_singleton_model(AuthManager::new_for_test);
+    app.add_singleton_model(|_| NetworkStatus::new());
+    app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], &[]));
+    app.add_singleton_model(|_| ActiveAgentViewsModel::new());
+}
 
 /// Creates a test task with specified creator UID and updated_at time
 fn create_test_task(
@@ -63,6 +77,31 @@ fn create_test_task(
         last_event_sequence: None,
         children: vec![],
     }
+}
+
+#[test]
+fn logged_out_local_ai_does_not_stay_loading_forever() {
+    App::test((), |mut app| async move {
+        let _management_guard = FeatureFlag::AgentManagementView.override_enabled(true);
+
+        install_agent_conversations_model_singletons(
+            &mut app,
+            AuthStateProvider::new_logged_out_for_test(),
+        );
+
+        let agent_model = app.add_singleton_model(AgentConversationsModel::new);
+
+        agent_model.read(&app, |model, _ctx| {
+            assert!(
+                !model.is_loading(),
+                "logged-out local AI sessions should not leave the Runs view stuck loading"
+            );
+            assert!(
+                !model.has_attempted_cloud_initial_load,
+                "cloud bootstrap should remain deferred while logged out"
+            );
+        });
+    });
 }
 
 #[test]
@@ -402,6 +441,7 @@ fn create_test_model() -> AgentConversationsModel {
         next_poll_abort_handle: None,
         active_data_consumers_per_window: HashMap::new(),
         has_finished_initial_load: false,
+        has_attempted_cloud_initial_load: false,
         manually_opened_task_ids: Default::default(),
         task_fetch_state: Default::default(),
     }

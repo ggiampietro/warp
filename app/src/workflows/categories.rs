@@ -1265,7 +1265,7 @@ impl VoltronFeatureViewMeta for CategoriesView {
 
         self.load_cloud_workflows(ctx);
 
-        send_telemetry_from_ctx!(TelemetryEvent::OpenWorkflowSearch, ctx);
+        ();
         self.search_term = String::new();
         ctx.notify();
     }

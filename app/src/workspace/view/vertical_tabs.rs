@@ -57,7 +57,6 @@ use pathfinder_geometry::vector::{vec2f, Vector2F};
 use settings::Setting as _;
 use std::path::{Path, PathBuf};
 use warp_core::context_flag::ContextFlag;
-use warp_core::telemetry::TelemetryEvent as _;
 use warp_core::ui::color::blend::Blend;
 use warp_core::ui::color::coloru_with_opacity;
 use warp_core::ui::theme::color::internal_colors;
@@ -4036,10 +4035,7 @@ fn render_terminal_diff_stats_badge(
         )
     })
     .on_click(move |ctx, app, _| {
-        send_telemetry_from_app_ctx!(
-            VerticalTabsTelemetryEvent::DiffStatsChipClicked { entrypoint },
-            app
-        );
+        ();
         let locator = PaneViewLocator {
             pane_group_id,
             pane_id,
@@ -4069,10 +4065,7 @@ fn render_terminal_pull_request_badge(
         render_badge_container(render_pull_request_badge_content(&label, appearance), bg)
     })
     .on_click(move |ctx, app, _| {
-        send_telemetry_from_app_ctx!(
-            VerticalTabsTelemetryEvent::PrChipClicked { entrypoint },
-            app
-        );
+        ();
         ctx.dispatch_typed_action(WorkspaceAction::OpenLink(url.clone()));
     })
     .with_cursor(Cursor::PointingHand)

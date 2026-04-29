@@ -186,7 +186,7 @@ impl ChannelState {
     /// `telemetry_config: None`, in which case UI that controls telemetry
     /// should be hidden since the toggle has no effect.
     pub fn is_telemetry_available() -> bool {
-        CHANNEL_STATE.lock().config.telemetry_config.is_some()
+        false
     }
 
     /// Returns whether this build has a crash reporting config and can therefore
@@ -194,7 +194,7 @@ impl ChannelState {
     /// `crash_reporting_config: None`, in which case UI that controls crash
     /// reporting should be hidden since the toggle has no effect.
     pub fn is_crash_reporting_available() -> bool {
-        CHANNEL_STATE.lock().config.crash_reporting_config.is_some()
+        false
     }
 
     pub fn releases_base_url() -> Cow<'static, str> {

@@ -705,12 +705,7 @@ impl TerminalView {
             log::warn!("Pane stack not available, cannot enter cloud mode");
         }
 
-        send_telemetry_from_ctx!(
-            CloudAgentTelemetryEvent::EnteredCloudMode {
-                entry_point: CloudModeEntryPoint::LocalSession
-            },
-            ctx
-        );
+        ();
     }
 
     /// Renders the ambient agent progress view based on agent progress.
