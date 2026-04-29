@@ -127,6 +127,21 @@ case "$OS_TYPE" in
     sudo dpkg -i --force-all "$deb_path"
     sudo apt-get install -f -y
 
+    if [[ -x /opt/warpdotdev/warp-terminal-oss/warp-oss ]]; then
+      sudo ln -sf /opt/warpdotdev/warp-terminal-oss/warp-oss /usr/bin/warp-oss
+      sudo ln -sf /opt/warpdotdev/warp-terminal-oss/warp-oss /usr/bin/warp-terminal-oss
+    fi
+
+    if command -v update-desktop-database >/dev/null 2>&1; then
+      sudo update-desktop-database /usr/share/applications || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+      sudo gtk-update-icon-cache -f /usr/share/icons/hicolor || true
+    fi
+    if command -v update-mime-database >/dev/null 2>&1; then
+      sudo update-mime-database /usr/share/mime || true
+    fi
+
     echo "Installed package from: $deb_path"
     ;;
 

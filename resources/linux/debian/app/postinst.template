@@ -7,6 +7,18 @@ ln -s @@OPTDIR@@/@@BINARY_NAME@@ /usr/bin/warp-terminal@@CHANNEL_SUFFIX@@
 rm -f /usr/bin/@@BINARY_NAME@@
 ln -s @@OPTDIR@@/@@BINARY_NAME@@ /usr/bin/@@BINARY_NAME@@
 
+# Repair the installed desktop entry so launchers work even if /usr/bin
+# symlinks are stale or were omitted by an older package version.
+DESKTOP_FILE="/usr/share/applications/dev.warp.Warp@@CHANNEL@@.desktop"
+if [[ -f "$DESKTOP_FILE" ]]; then
+  sed -i -E "s#^Exec=.*#Exec=@@OPTDIR@@/@@BINARY_NAME@@ %U#" "$DESKTOP_FILE"
+  if grep -q '^TryExec=' "$DESKTOP_FILE"; then
+    sed -i -E "s#^TryExec=.*#TryExec=@@OPTDIR@@/@@BINARY_NAME@@#" "$DESKTOP_FILE"
+  else
+    sed -i -E "/^Exec=/a TryExec=@@OPTDIR@@/@@BINARY_NAME@@" "$DESKTOP_FILE"
+  fi
+fi
+
 # Make sure the system incorporates the newly-installed desktop file.
 if hash update-desktop-database 2>/dev/null; then
 	update-desktop-database
