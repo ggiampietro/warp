@@ -131,6 +131,9 @@ use crate::code_review::git_status_update::{
 };
 use crate::code_review::telemetry_event::CodeReviewPaneEntrypoint;
 use crate::projects::ProjectManagementModel;
+use crate::remote_server::manager::{
+    RemoteServerInitPhase, RemoteServerManager, RemoteServerManagerEvent,
+};
 use crate::settings::ai::FocusedTerminalInfo;
 use crate::settings_view::mcp_servers_page::MCPServersSettingsPage;
 use crate::terminal::cli_agent_sessions::event::{
@@ -4168,8 +4171,7 @@ impl TerminalView {
 
         // Forward RemoteServerManager setup events into the terminal event stream
         // so the ModelEventDispatcher can gate session initialization on them.
-        if crate::features::FeatureFlag::SshRemoteServer.is_enabled() {
-            use crate::remote_server::manager::{RemoteServerManager, RemoteServerManagerEvent};
+        if FeatureFlag::SshRemoteServer.is_enabled() {
             let mgr_handle = RemoteServerManager::handle(ctx);
             ctx.subscribe_to_model(&mgr_handle, |me, _, event, ctx| {
                 // `RemoteServerManager` is a singleton, so every `TerminalView` receives every event.
@@ -4181,13 +4183,11 @@ impl TerminalView {
                     }
                 }
                 match event {
-                    RemoteServerManagerEvent::SetupStateChanged { session_id, state } => {
-                        me.model.lock().event_proxy.send_terminal_event(
-                            crate::terminal::event::Event::RemoteServerSetupStateChanged {
-                                session_id: *session_id,
-                                state: state.clone(),
-                            },
-                        );
+                    RemoteServerManagerEvent::SetupStateChanged { .. } => {
+                        // Sessions handles the state update directly via its own
+                        // subscription to the manager. Notify the view so the
+                        // loading footer re-renders with the updated message.
+                        ctx.notify();
                     }
                     RemoteServerManagerEvent::SessionConnected { session_id, .. } => {
                         me.model.lock().event_proxy.send_terminal_event(
@@ -11241,10 +11241,15 @@ impl TerminalView {
         })
     }
 
-    /// Returns `true` when the pending session has a connecting remote-server setup state
-    /// and no failure banner is already shown for that session.
+    /// Returns `true` when the loading footer should be shown in place of the
+    /// input editor during the SSH remote-server setup flow.
     fn show_remote_server_loading_footer(&self, model: &TerminalModel, app: &AppContext) -> bool {
         if !FeatureFlag::SshRemoteServer.is_enabled() {
+            return false;
+        }
+        // Don't show the loading footer while the choice block is visible;
+        // the choice block replaces it.
+        if self.active_ssh_remote_server_choice_block().is_some() {
             return false;
         }
         let Some(pending_sid) = model.pending_session_id() else {
@@ -11263,7 +11268,7 @@ impl TerminalView {
         self.sessions
             .as_ref(app)
             .remote_server_setup_state(pending_sid)
-            .is_some_and(|state| state.is_connecting())
+            .is_some_and(|state| state.is_in_progress())
     }
 
     /// Renders a shimmering loading footer in place of the input editor
@@ -11281,6 +11286,7 @@ impl TerminalView {
                     .as_ref(app)
                     .remote_server_setup_state(sid)
                     .map(|state| match state {
+                        RemoteServerSetupState::Checking => "Checking...".to_string(),
                         RemoteServerSetupState::Installing {
                             progress_percent: Some(p),
                         } => format!("Installing... ({p}%)"),
